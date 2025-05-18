@@ -44,6 +44,7 @@ from functools import lru_cache
 from importlib.metadata import PackageNotFoundError, version
 from importlib.util import find_spec
 from io import BytesIO
+from json import JSONDecodeError
 from multiprocessing.reduction import ForkingPickler
 from pathlib import Path
 from typing import (
@@ -2118,6 +2119,16 @@ def log_info_on_rank0(logger, msg):
         logger.info(msg)
 
 
+def load_json_config(data: str):
+    try:
+        return json.loads(data)
+    except JSONDecodeError:
+        return json.loads(Path(data).read_text())
+
+
+def dispose_tensor(x: torch.Tensor):
+    x.set_(torch.empty((0,), device=x.device, dtype=x.dtype))
+    
 T = TypeVar("T")
 
 class Withable(Generic[T]):
