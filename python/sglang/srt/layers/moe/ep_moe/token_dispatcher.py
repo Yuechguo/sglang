@@ -1,5 +1,9 @@
 from sglang.srt.layers.quantization.deep_gemm import _ENABLE_JIT_DEEPGEMM
-from sglang.srt.utils import DeepEPMode
+from sglang.srt.managers.expert_distribution import (
+    get_global_expert_distribution_recorder,
+)
+from sglang.srt.managers.schedule_batch import global_server_args_dict
+from sglang.srt.utils import DeepEPMode, load_json_config
 
 try:
     from deep_ep import Buffer
@@ -297,6 +301,13 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
             expert_alignment=128 if _ENABLE_JIT_DEEPGEMM else 1,
         )
 
+        get_global_expert_distribution_recorder().on_deepep_dispatch_normal(
+            num_recv_tokens_per_expert_list,
+            num_tokens_per_rank=num_tokens_per_rank,
+            num_tokens_per_rdma_rank=num_tokens_per_rdma_rank,
+            num_tokens_per_expert=num_tokens_per_expert,
+        )
+
         return (
             recv_x,
             recv_topk_idx,
@@ -458,6 +469,10 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
         hook,
     ):
         hook() if self.return_recv_hook else event.current_stream_wait()
+
+        get_global_expert_distribution_recorder().on_deepep_dispatch_low_latency(
+            masked_m
+        )
 
         reorder_topk_ids = seg_indptr = None
 
