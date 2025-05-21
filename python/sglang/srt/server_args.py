@@ -911,6 +911,7 @@ class ServerArgs:
             "--attention-backend",
             type=str,
             choices=[
+                "aiter",
                 "flashinfer",
                 "triton",
                 "torch_native",
