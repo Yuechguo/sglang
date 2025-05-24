@@ -386,6 +386,10 @@ class ModelRunner:
             if self.should_log:
                 logger.info("Chunked prefix cache is turned on.")
 
+        if server_args.attention_backend == "aiter":
+            if self.model_config.context_len > 8192:
+                self.mem_fraction_static *= 0.85
+
     def init_torch_distributed(self):
         logger.info("Init torch distributed begin.")
 
