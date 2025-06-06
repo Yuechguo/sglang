@@ -59,6 +59,7 @@ from sglang.srt.layers.moe.topk import select_experts
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.layers.quantization.deep_gemm import _ENABLE_JIT_DEEPGEMM
 from sglang.srt.layers.quantization.fp8_kernel import (
+    is_fp8_fnuz,
     per_tensor_quant_mla_fp8,
     per_token_group_quant_mla_deep_gemm_masked_fp8,
 )
@@ -97,6 +98,8 @@ from sglang.srt.utils import (
 
 _is_hip = is_hip()
 _is_cuda = is_cuda()
+_is_fp8_fnuz = is_fp8_fnuz()
+_use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
 
 if _is_cuda:
     from sgl_kernel import awq_dequantize, bmm_fp8, merge_state_v2
@@ -111,6 +114,9 @@ if _is_hip:
     from sglang.srt.layers.attention.triton_ops.rocm_mla_decode_rope import (
         decode_attention_fwd_grouped_rope,
     )
+
+if _use_aiter:
+    from aiter.rotary_embedding import get_rope
 
 logger = logging.getLogger(__name__)
 
@@ -551,6 +557,7 @@ class DeepseekV2AttentionMLA(nn.Module):
         )
 
         self.alt_stream = alt_stream
+        self.attn_mha.kv_b_proj = None
 
         self.w_kc = None
         self.w_vc = None
@@ -579,6 +586,18 @@ class DeepseekV2AttentionMLA(nn.Module):
     def dispatch_attn_forward_method(
         self, forward_batch: ForwardBatch
     ) -> AttnForwardMethod:
+        def _dispatch_mla_subtype():
+            if _is_hip:
+                if (
+                    self.rocm_fused_decode_mla
+                    and forward_batch.forward_mode.is_decode()
+                ):
+                    return AttnForwardMethod.MLA_FUSED_ROPE
+                else:
+                    return AttnForwardMethod.MLA
+            else:
+                return AttnForwardMethod.MLA
+            
         if self.attention_backend == "flashinfer":
             # Flashinfer MLA: Do not absorb when enabling ragged prefill
             if (
@@ -606,6 +625,15 @@ class DeepseekV2AttentionMLA(nn.Module):
                 )
             ):
                 return AttnForwardMethod.MHA_CHUNKED_KV
+            else:
+                return _dispatch_mla_subtype()
+        elif self.attention_backend == "aiter":
+            if (
+                forward_batch.forward_mode.is_extend()
+                and not forward_batch.forward_mode.is_target_verify()
+                and not forward_batch.forward_mode.is_draft_extend()
+            ):
+                return AttnForwardMethod.MHA
             else:
                 return AttnForwardMethod.MLA
         else:

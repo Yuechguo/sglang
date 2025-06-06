@@ -1,5 +1,5 @@
 import os
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 import torch
 
@@ -28,6 +28,7 @@ from sglang.srt.utils import (
     get_cuda_version,
     get_device_capability,
     is_cuda,
+    is_flashinfer_available,
     is_hip,
 )
 
@@ -35,9 +36,10 @@ _is_hip = is_hip()
 _is_cuda = is_cuda()
 _is_fp8_fnuz = is_fp8_fnuz()
 
-use_aiter_moe = get_bool_env_var("SGLANG_AITER_MOE")
 
-if _is_hip and use_aiter_moe:
+_use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
+
+if _use_aiter:
     from aiter import gemm_a8w8_blockscale
 
 if _is_cuda:
@@ -80,6 +82,11 @@ def cutlass_fp8_supported():
     return False
 
 
+def is_sm100_supported(device=None) -> bool:
+    return (torch.cuda.get_device_capability(device)[0] == 10) and (
+        torch.version.cuda >= "12.8"
+    )
+
 def normalize_e4m3fn_to_e4m3fnuz(
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
@@ -118,8 +125,24 @@ def cutlass_block_fp8_supported() -> bool:
 
 CUTLASS_BLOCK_FP8_SUPPORTED = cutlass_block_fp8_supported()
 
+ENABLE_FLASHINFER_GEMM = (
+    get_bool_env_var("SGLANG_ENABLE_FLASHINFER_GEMM")
+    and is_sm100_supported()
+    and is_flashinfer_available()
+)
 
-def apply_w8a8_block_fp8_linear(
+def dispatch_w8a8_block_fp8_linear() -> Callable:
+    if ENABLE_FLASHINFER_GEMM:
+        return flashinfer_gemm_w8a8_block_fp8_linear
+    elif CUTLASS_BLOCK_FP8_SUPPORTED:
+        return cutlass_w8a8_block_fp8_linear_with_fallback
+    elif _use_aiter:
+        return aiter_w8a8_block_fp8_linear
+    else:
+        return triton_w8a8_block_fp8_linear
+
+
+def flashinfer_gemm_w8a8_block_fp8_linear(
     input: torch.Tensor,
     weight: torch.Tensor,
     block_size: List[int],
@@ -131,46 +154,96 @@ def apply_w8a8_block_fp8_linear(
     # View input as 2D matrix for fp8 methods
     input_2d = input.view(-1, input.shape[-1])
     output_shape = [*input.shape[:-1], weight.shape[0]]
-    # TODO: add more robust shape check here
-    shape_supported_by_cutlass = (
-        weight.shape[0] % 128 == 0 and weight.shape[1] % 128 == 0
+
+    q_input, x_scale = per_token_group_quant_fp8(
+        input_2d, block_size[1], column_major_scales=False
     )
-    if CUTLASS_BLOCK_FP8_SUPPORTED and shape_supported_by_cutlass:
-        q_input, x_scale = per_token_group_quant_fp8(
-            input_2d, block_size[1], column_major_scales=True
-        )
-        output = fp8_blockwise_scaled_mm(
-            q_input, weight.T, x_scale, weight_scale.T, out_dtype=input.dtype
-        )
-    elif _is_hip and use_aiter_moe:
-        q_input, x_scale = per_token_group_quant_fp8(
-            input_2d, block_size[1], column_major_scales=False
-        )
-        output = torch.zeros(
-            [q_input.shape[0], weight.shape[0]],
-            dtype=input.dtype,
-            device=q_input.device,
-        )
-        gemm_a8w8_blockscale(q_input, weight, x_scale, weight_scale, output)
-    else:
-        if _ENABLE_JIT_DEEPGEMM:
-            q_input, x_scale = sglang_per_token_group_quant_fp8(
-                input_2d,
-                block_size[1],
-                column_major_scales=True,
-                scale_tma_aligned=True,
-            )
-        else:
-            q_input, x_scale = per_token_group_quant_fp8(
-                input_2d, block_size[1], column_major_scales=False
-            )
-        output = w8a8_block_fp8_matmul(
-            q_input, weight, x_scale, weight_scale, block_size, output_dtype=input.dtype
-        )
+    output = w8a8_block_fp8_matmul(
+        q_input, weight, x_scale, weight_scale, block_size, output_dtype=input.dtype
+    )
 
     if bias is not None:
         output = output + bias
     return output.to(dtype=input.dtype).view(*output_shape)
+
+def cutlass_w8a8_block_fp8_linear_with_fallback(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    block_size: List[int],
+    weight_scale: torch.Tensor,
+    input_scale: Optional[torch.Tensor] = None,
+    bias: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    assert input_scale is None
+
+    # TODO: add more robust shape check here
+    shape_supported = weight.shape[0] % 128 == 0 and weight.shape[1] % 128 == 0
+
+    if not shape_supported:
+        # fallback to triton
+        return triton_w8a8_block_fp8_linear(
+            input, weight, block_size, weight_scale, input_scale, bias
+        )
+
+    input_2d = input.view(-1, input.shape[-1])
+    output_shape = [*input.shape[:-1], weight.shape[0]]
+
+    q_input, x_scale = per_token_group_quant_fp8(
+        input_2d, block_size[1], column_major_scales=True
+    )
+    output = fp8_blockwise_scaled_mm(
+        q_input, weight.T, x_scale, weight_scale.T, out_dtype=input_2d.dtype
+    )
+    if bias is not None:
+        output += bias
+    return output.to(dtype=input_2d.dtype).view(*output_shape)
+
+def aiter_w8a8_block_fp8_linear(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    block_size: List[int],
+    weight_scale: torch.Tensor,
+    input_scale: Optional[torch.Tensor] = None,
+    bias: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    assert input_scale is None
+    input_2d = input.view(-1, input.shape[-1])
+    output_shape = [*input.shape[:-1], weight.shape[0]]
+
+    q_input, x_scale = per_token_group_quant_fp8(
+        input_2d, block_size[1], column_major_scales=False
+    )
+    output = gemm_a8w8_blockscale(
+        q_input, weight, x_scale, weight_scale, dtype=input.dtype
+    )
+
+    if bias is not None:
+        output += bias
+
+    return output.to(dtype=input_2d.dtype).view(*output_shape)
+
+
+def triton_w8a8_block_fp8_linear(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    block_size: List[int],
+    weight_scale: torch.Tensor,
+    input_scale: Optional[torch.Tensor] = None,
+    bias: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    assert input_scale is None
+    input_2d = input.view(-1, input.shape[-1])
+    output_shape = [*input.shape[:-1], weight.shape[0]]
+
+    q_input, x_scale = per_token_group_quant_fp8(
+        input_2d, block_size[1], column_major_scales=False
+    )
+    output = w8a8_block_fp8_matmul(
+        q_input, weight, x_scale, weight_scale, block_size, output_dtype=input_2d.dtype
+    )
+    if bias is not None:
+        output += bias
+    return output.to(dtype=input_2d.dtype).view(*output_shape)
 
 
 def input_to_float8(
