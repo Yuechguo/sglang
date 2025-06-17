@@ -23,13 +23,14 @@ from sglang.srt.utils import fast_topk, is_cuda, is_hip, next_power_of_2
 
 if is_cuda():
     from sgl_kernel import (
+        fast_topk,
         top_k_renorm_prob,
         top_p_renorm_prob,
         tree_speculative_sampling_target_only,
         verify_tree_greedy,
     )
 elif is_hip():
-    from sgl_kernel import verify_tree_greedy
+    from sgl_kernel import fast_topk, verify_tree_greedy
 
 if TYPE_CHECKING:
     from sglang.srt.managers.schedule_batch import ScheduleBatch
