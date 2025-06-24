@@ -23,16 +23,31 @@ from sglang.srt.managers.expert_distribution import (
     get_global_expert_distribution_recorder,
 )
 from sglang.srt.managers.schedule_batch import global_server_args_dict
-from sglang.srt.utils import get_compiler_backend, is_cuda, is_hip
+from sglang.srt.utils import (
+    cpu_has_amx_support,
+    get_bool_env_var,
+    get_compiler_backend,
+    is_cpu,
+    is_cuda,
+    is_hip,
+)
 
 _is_cuda = is_cuda()
 _is_hip = is_hip()
+_use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
+_is_cpu_amx_available = cpu_has_amx_support()
+_is_cpu = is_cpu()
 
 if _is_cuda:
     from sgl_kernel import moe_fused_gate
 
 if _is_cuda or _is_hip:
     from sgl_kernel import topk_softmax
+if _use_aiter:
+    try:
+        from aiter import biased_grouped_topk as aiter_biased_grouped_topk
+    except ImportError:
+        raise ImportError("aiter is required when SGLANG_USE_AITER is set to True")
 
 def fused_topk_native(
     hidden_states: torch.Tensor,
@@ -225,7 +240,7 @@ def biased_grouped_topk(
         <= 32  # moe_fused_gate kernel ensure that num_experts/num_expert_group does not exceed MAX_VPT=32 now. And when kernel can handle MAX_VPT > 32, we can remove this assertion.
         and is_power_of_two(correction_bias.shape[0])
     ):
-        return moe_fused_gate(
+        topk_weights, topk_ids = moe_fused_gate(
             gating_output,
             correction_bias,
             num_expert_group,
@@ -234,6 +249,26 @@ def biased_grouped_topk(
             n_share_experts_fusion,
             routed_scaling_factor,
         )
+        return topk_weights, topk_ids
+    elif _use_aiter:
+        token = gating_output.shape[0]
+        device = gating_output.device
+        assert (
+            hidden_states.shape[0] == gating_output.shape[0]
+        ), f"Number of tokens mismatch: hidden_states.shape[0] = {hidden_states.shape[0]}, gating_output.shape[0] = {gating_output.shape[0]}"
+        topk_weights = torch.empty((token, topk), dtype=torch.float32, device=device)
+        topk_ids = torch.empty((token, topk), dtype=torch.int32, device=device)
+        aiter_biased_grouped_topk(
+            gating_output,
+            correction_bias,
+            topk_weights,
+            topk_ids,
+            num_expert_group,
+            topk_group,
+            renormalize,
+            routed_scaling_factor,
+        )
+        return topk_weights, topk_ids
     else:
         biased_grouped_topk_fn = (
             torch.compile(
