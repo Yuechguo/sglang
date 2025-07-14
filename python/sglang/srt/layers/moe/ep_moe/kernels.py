@@ -161,6 +161,24 @@ def run_moe_ep_preproess(topk_ids: torch.Tensor, num_experts: int):
     )
     return reorder_topk_ids, src2dst, seg_indptr
 
+@triton.jit
+def compute_ep_moe_local_expert_mark(
+    topk_ids_ptr,
+    start_expert_id,
+    end_expert_id,
+    topk,
+    invalid_const_id_value: tl.constexpr,
+):
+    src_idx_int32 = tl.program_id(0)
+    topk_ids_ptr = topk_ids_ptr + src_idx_int32 * topk
+    
+    for idx in range(topk):
+        expert_id = tl.load(topk_ids_ptr + idx,)
+        if expert_id >= start_expert_id and expert_id <= end_expert_id:
+            expert_id = expert_id - start_expert_id
+        else :
+            expert_id = invalid_const_id_value
+        tl.store(topk_ids_ptr + idx, expert_id) 
 
 @triton.jit
 def pre_reorder_triton_kernel(

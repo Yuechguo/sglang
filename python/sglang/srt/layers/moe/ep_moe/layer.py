@@ -18,6 +18,7 @@ from sglang.srt.layers.moe.ep_moe.kernels import (
     grouped_gemm_triton,
     moe_ep_deepgemm_preprocess,
     post_reorder_triton_kernel,
+    compute_ep_moe_local_expert_mark,
     pre_reorder_triton_kernel,
     run_moe_ep_preproess,
     silu_and_mul_masked_post_quant_fwd,
@@ -26,6 +27,7 @@ from sglang.srt.layers.moe.ep_moe.kernels import (
 )
 from sglang.srt.layers.moe.fused_moe_triton import FusedMoeWeightScaleSupported
 from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE, FusedMoEMethodBase
+from sglang.srt.layers.moe.fused_moe_triton.fused_moe import fused_experts
 from sglang.srt.layers.moe.topk import select_experts
 from sglang.srt.layers.quantization import deep_gemm_wrapper
 from sglang.srt.layers.quantization.base_config import (
@@ -65,7 +67,6 @@ if _use_aiter:
     from aiter.ops.shuffle import shuffle_weight
 
 logger = logging.getLogger(__name__)
-
 
 class GroupedGemmRunner(torch.nn.Module):
     flashinfer_gemm_warpper = None
@@ -252,7 +253,24 @@ class EPMoE(torch.nn.Module):
         if deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM and self.use_fp8_w8a8:
             return self.forward_deepgemm(hidden_states, router_logits)
         else:
-            return self.forward_normal(hidden_states, router_logits)
+            if self.quant_method is not None:
+                return self.quant_method.apply(
+                    layer=self,
+                    x=hidden_states,
+                    router_logits=router_logits,
+                    top_k=self.top_k,
+                    renormalize=self.renormalize,
+                    use_grouped_topk=self.use_grouped_topk,
+                    topk_group=self.topk_group,
+                    num_expert_group=self.num_expert_group,
+                    num_fused_shared_experts=self.num_fused_shared_experts,
+                    custom_routing_function=self.custom_routing_function,
+                    correction_bias=self.correction_bias,
+                    activation=self.activation,
+                    routed_scaling_factor=self.routed_scaling_factor,
+                )
+            else :
+                return self.forward_normal(hidden_states, router_logits)
 
     def forward_deepgemm(
         self, hidden_states: torch.Tensor, router_logits: torch.Tensor
@@ -417,7 +435,7 @@ class EPMoE(torch.nn.Module):
                 use_flashinfer=False,  # TODO: use flashinfer
                 use_per_token_if_dynamic=self.use_per_token_if_dynamic,
             )
-
+      
         topk_weights, topk_ids = select_experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
@@ -434,7 +452,7 @@ class EPMoE(torch.nn.Module):
                 layer_id=self.layer_id,
             ),
         )
-
+    
         reorder_topk_ids, src2dst, seg_indptr = run_moe_ep_preproess(
             topk_ids, self.num_experts
         )
@@ -816,6 +834,21 @@ class UnquantizedEPMoEMethod(FusedMoEMethodBase, CustomOp):
         )
         layer.register_parameter("w2_weight_scale", w2_weight_scale)
         set_weight_attrs(w2_weight_scale, extra_weight_attrs)
+    
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if _use_aiter:
+            layer.w13_weight = torch.nn.Parameter(
+                shuffle_weight(layer.w13_weight.data, (16, 16)),
+                requires_grad=False,
+            )
+            torch.cuda.empty_cache()
+            layer.w2_weight = torch.nn.Parameter(
+                shuffle_weight(layer.w2_weight.data, (16, 16)),
+                requires_grad=False,
+            )
+            torch.cuda.empty_cache()
+        
+        return
 
     def apply(
         self,
@@ -827,10 +860,124 @@ class UnquantizedEPMoEMethod(FusedMoEMethodBase, CustomOp):
         use_grouped_topk: bool,
         topk_group: Optional[int] = None,
         num_expert_group: Optional[int] = None,
+        num_fused_shared_experts: int = 0,
         custom_routing_function: Optional[Callable] = None,
+        correction_bias: Optional[torch.Tensor] = None,
+        activation: str = "silu",
+        apply_router_weight_on_input: bool = False,
+        inplace: bool = True,
+        no_combine: bool = False,
+        routed_scaling_factor: Optional[float] = None,
     ) -> torch.Tensor:
-        raise NotImplementedError
+        return self.forward(
+            x=x,
+            layer=layer,
+            router_logits=router_logits,
+            top_k=top_k,
+            renormalize=renormalize,
+            use_grouped_topk=use_grouped_topk,
+            topk_group=topk_group,
+            num_expert_group=num_expert_group,
+            num_fused_shared_experts=num_fused_shared_experts,
+            custom_routing_function=custom_routing_function,
+            correction_bias=correction_bias,
+            activation=activation,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+            inplace=inplace,
+            no_combine=no_combine,
+            routed_scaling_factor=routed_scaling_factor,
+        )
+    
+    def forward_cuda(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        use_grouped_topk: bool,
+        top_k: int,
+        router_logits: torch.Tensor,
+        renormalize: bool,
+        topk_group: Optional[int] = None,
+        num_expert_group: Optional[int] = None,
+        num_fused_shared_experts: int = 0,
+        custom_routing_function: Optional[Callable] = None,
+        correction_bias: Optional[torch.Tensor] = None,
+        activation: str = "silu",
+        apply_router_weight_on_input: bool = False,
+        inplace: bool = True,
+        no_combine: bool = False,
+        routed_scaling_factor: Optional[float] = None,
+    ) -> torch.Tensor:
+        
+        topk_weights, topk_ids = select_experts(
+            hidden_states=x,
+            router_logits=router_logits,
+            use_grouped_topk=use_grouped_topk,
+            top_k=top_k,
+            renormalize=renormalize,
+            topk_group=topk_group,
+            num_expert_group=num_expert_group,
+            num_fused_shared_experts=num_fused_shared_experts,
+            custom_routing_function=custom_routing_function,
+            correction_bias=correction_bias,
+            routed_scaling_factor=routed_scaling_factor,
+        )
+        
+        # idx == -1 mean not used in ffn gemm
+        # (idx == num_experts_per_partition) meaning not used in aiter fused_moe
+        compute_ep_moe_local_expert_mark[(x.shape[0],)](
+            topk_ids,
+            layer.start_expert_id,
+            layer.end_expert_id,
+            top_k,
+            layer.num_experts_per_partition
+        )
 
+        # condition = (topk_ids >= layer.start_expert_id) & (topk_ids <= layer.end_expert_id)
+        # topk_ids_copy = torch.where(
+        #     condition,
+        #     topk_ids - layer.start_expert_id,
+        #     torch.full_like(topk_ids, layer.num_experts_per_partition if _use_aiter else -1)
+        # )
+            
+        if _use_aiter:
+            assert not no_combine, "unsupported"
+            if apply_router_weight_on_input:
+                assert (
+                    topk_weights.dim() == 2
+                ), "`topk_weights` should be in shape (num_tokens, topk)"
+                _, topk = topk_weights.shape
+                assert (
+                    topk == 1
+                ), "Only support topk=1 when `apply_router_weight_on_input` is True"
+                x = x * topk_weights.to(x.dtype)
+                topk_weights = torch.ones_like(
+                    topk_weights, dtype=torch.float32
+                )  # topk_weights must be FP32 (float32)
+            
+            return fused_moe(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                topk_weights,
+                topk_ids,
+                activation=(
+                    ActivationType.Silu if activation == "silu" else ActivationType.Gelu
+                ),
+            )
+        else:
+            raise NotImplementedError
+            # return fused_experts(
+            #     hidden_states=x,
+            #     w1=layer.w13_weight,
+            #     w2=layer.w2_weight,
+            #     topk_weights=topk_weights,
+            #     topk_ids=topk_ids,
+            #     inplace=inplace and not no_combine,
+            #     activation=activation,
+            #     apply_router_weight_on_input=apply_router_weight_on_input,
+            #     no_combine=no_combine,
+            #     routed_scaling_factor=routed_scaling_factor,
+            # )
 
 class Fp8EPMoEMethod(Fp8MoEMethod):
     """MoE method for FP8.
