@@ -541,8 +541,9 @@ def moe_align_block_size_stage1(
     for i in range(tokens_per_thread):
         if start_idx + i < numel:
             idx = tl.load(topk_ids_ptr + start_idx + i)
-            token_cnt = tl.load(tokens_cnts_ptr + off_c + idx)
-            tl.store(tokens_cnts_ptr + off_c + idx, token_cnt + 1)
+            if idx < num_experts:
+                token_cnt = tl.load(tokens_cnts_ptr + off_c + idx)
+                tl.store(tokens_cnts_ptr + off_c + idx, token_cnt + 1)
 
 
 @triton.jit
@@ -600,10 +601,11 @@ def moe_align_block_size_stage4(
 
     for i in range(start_idx, tl.minimum(start_idx + tokens_per_thread, numel)):
         expert_id = tl.load(topk_ids_ptr + i)
-        token_cnt = tl.load(tokens_cnts_ptr + off_t + expert_id)
-        rank_post_pad = token_cnt + tl.load(cumsum_ptr + expert_id)
-        tl.store(sorted_token_ids_ptr + rank_post_pad, i)
-        tl.store(tokens_cnts_ptr + off_t + expert_id, token_cnt + 1)
+        if expert_id < num_experts:
+            token_cnt = tl.load(tokens_cnts_ptr + off_t + expert_id)
+            rank_post_pad = token_cnt + tl.load(cumsum_ptr + expert_id)
+            tl.store(sorted_token_ids_ptr + rank_post_pad, i)
+            tl.store(tokens_cnts_ptr + off_t + expert_id, token_cnt + 1)
 
 
 def moe_align_block_size_triton(
@@ -1561,8 +1563,9 @@ def fused_experts_impl(
     )
 
     config = get_config_func(M)
-
-    cache = torch.empty(
+    
+    # make internal cache all zeros casue in extreme cases of EP mode, some inplace values may not be set.
+    cache = torch.zeros(
         M * topk_ids.shape[1] * max(N, w2.shape[1]),
         device=hidden_states.device,
         dtype=hidden_states.dtype,
@@ -1570,7 +1573,7 @@ def fused_experts_impl(
     intermediate_cache1 = cache[: M * topk_ids.shape[1] * N].view(
         (M, topk_ids.shape[1], N),
     )
-    intermediate_cache2 = torch.empty(
+    intermediate_cache2 = torch.zeros(
         (M * topk_ids.shape[1], N // 2),
         device=hidden_states.device,
         dtype=hidden_states.dtype,
@@ -1583,7 +1586,7 @@ def fused_experts_impl(
 
     if no_combine:
         assert not inplace
-        out_hidden_states = torch.empty(
+        out_hidden_states = torch.zeros(
             (num_tokens, topk_ids.shape[1], w2.shape[1]),
             device=hidden_states.device,
             dtype=hidden_states.dtype,
@@ -1663,6 +1666,8 @@ def fused_experts_impl(
         else:
             raise ValueError(f"Unsupported activation: {activation=}")
 
+        # reuse cache all need to clean up in case of residual values in EP mode
+        intermediate_cache3.zero_()
         invoke_fused_moe_kernel(
             intermediate_cache2,
             w2,
