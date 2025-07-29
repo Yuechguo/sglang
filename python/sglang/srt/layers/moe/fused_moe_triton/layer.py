@@ -31,7 +31,7 @@ _is_hip = is_hip()
 
 if _is_hip:
     from aiter import ActivationType
-    from aiter.fused_moe_bf16_asm import ck_moe_2stages
+    from aiter.fused_moe import fused_moe
     from aiter.ops.shuffle import shuffle_weight
 
 logger = logging.getLogger(__name__)
@@ -199,7 +199,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                     topk_weights, dtype=torch.float32
                 )  # topk_weights must be FP32 (float32)
 
-            return ck_moe_2stages(
+            return fused_moe(
                 x,
                 layer.w13_weight,
                 layer.w2_weight,
