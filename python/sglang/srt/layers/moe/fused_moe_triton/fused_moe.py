@@ -586,7 +586,7 @@ def moe_align_block_size(
     - The padding ensures that the total number of tokens is now divisible
         by block_size for proper block matrix operations.
     """
-    max_num_tokens_padded = topk_ids.numel() + (num_experts + 1) * (block_size - 1)
+    max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
     sorted_ids = torch.empty(
         (max_num_tokens_padded,), dtype=torch.int32, device=topk_ids.device
     )
@@ -598,7 +598,7 @@ def moe_align_block_size(
 
     # In EP, expert_ids for filtered experts are -1. We have num_experts + 1 ids in total.
     cumsum_buffer = torch.empty(
-        (num_experts + 2,), dtype=torch.int32, device=topk_ids.device
+        (num_experts + 1,), dtype=torch.int32, device=topk_ids.device
     )
 
     # Threshold based on benchmark results
@@ -608,7 +608,7 @@ def moe_align_block_size(
 
     sgl_moe_align_block_size(
         topk_ids,
-        num_experts + 1,
+        num_experts,
         block_size,
         sorted_ids,
         expert_ids,
@@ -1385,7 +1385,7 @@ def fused_experts_impl(
 
     config = get_config_func(M)
 
-    cache = torch.empty(
+    cache = torch.zeros(
         M * topk_ids.shape[1] * max(N, w2.shape[1]),
         device=hidden_states.device,
         dtype=hidden_states.dtype,
@@ -1393,7 +1393,7 @@ def fused_experts_impl(
     intermediate_cache1 = cache[: M * topk_ids.shape[1] * N].view(
         (M, topk_ids.shape[1], N),
     )
-    intermediate_cache2 = torch.empty(
+    intermediate_cache2 = torch.zeros(
         (M * topk_ids.shape[1], N // 2),
         device=hidden_states.device,
         dtype=hidden_states.dtype,
@@ -1406,7 +1406,7 @@ def fused_experts_impl(
 
     if no_combine:
         assert not inplace
-        out_hidden_states = torch.empty(
+        out_hidden_states = torch.zeros(
             (num_tokens, topk_ids.shape[1], w2.shape[1]),
             device=hidden_states.device,
             dtype=hidden_states.dtype,
@@ -1414,7 +1414,7 @@ def fused_experts_impl(
     elif inplace:
         out_hidden_states = hidden_states
     else:
-        out_hidden_states = torch.empty_like(hidden_states)
+        out_hidden_states = torch.zeros_like(hidden_states)
 
     for chunk in range((num_tokens // CHUNK_SIZE) + 1):
         begin_chunk_idx, end_chunk_idx = (
@@ -1486,6 +1486,7 @@ def fused_experts_impl(
         else:
             raise ValueError(f"Unsupported activation: {activation=}")
 
+        intermediate_cache3.fill_(0)
         invoke_fused_moe_kernel(
             intermediate_cache2,
             w2,

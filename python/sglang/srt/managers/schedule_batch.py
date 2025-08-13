@@ -88,6 +88,7 @@ GLOBAL_SERVER_ARGS_KEYS = [
     "enable_dp_lm_head",
     "moe_a2a_backend",
     "deepep_mode",
+    "shared_expert_mode",
     "enable_flashinfer_cutlass_moe",
     "enable_flashinfer_trtllm_moe",
     "enable_flashinfer_allreduce_fusion",

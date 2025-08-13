@@ -34,6 +34,7 @@ from sglang.srt.utils import cpu_has_amx_support, get_bool_env_var, is_cpu, is_h
 _is_hip = is_hip()
 _is_cpu_amx_available = cpu_has_amx_support()
 _is_cpu = is_cpu()
+_use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
 
 logger = logging.getLogger(__name__)
 
@@ -65,8 +66,8 @@ class FusedMoE(torch.nn.Module):
     load_weights function in each model implementation.
 
     Args:
-        num_experts: Number of experts in the model
-        top_k: Number of experts selected for each token
+        num_experts: Number of all experts in the model, including the fused_shared experts.
+        top_k: Number of experts selected for each token, including the fused_shared experts.
         hidden_size: Input hidden state size of the transformer
         intermediate_size: Intermediate size of the experts
         params_dtype: Data type for the parameters.
@@ -74,6 +75,7 @@ class FusedMoE(torch.nn.Module):
         renomalize: Whether to renormalize the logits in the fused_moe kernel
         quant_config: Quantization configure.
         inplace: suggestion to compute inplace (modify input activation).
+        num_fused_shared_experts: num of shared expert to fused in FusedMoE or EPMoE mode
     """
 
     def __init__(
@@ -107,8 +109,6 @@ class FusedMoE(torch.nn.Module):
         self.hidden_size = hidden_size
         self.num_experts = num_experts
         self.num_fused_shared_experts = num_fused_shared_experts
-        self.expert_map_cpu = None
-        self.expert_map_gpu = None
 
         if enable_flashinfer_cutlass_moe and quant_config is None:
             logger.warning("Disable flashinfer MoE when quantization config is None.")
@@ -119,20 +119,18 @@ class FusedMoE(torch.nn.Module):
         self.moe_ep_rank = get_moe_expert_parallel_rank()
         self.moe_tp_size = get_moe_tensor_parallel_world_size()
         self.moe_tp_rank = get_moe_tensor_parallel_rank()
-        assert num_experts % self.moe_ep_size == 0
-        self.num_local_experts = num_experts // self.moe_ep_size
-        if self.moe_ep_size > 1:
-            # TODO(ch-wan): support shared experts fusion
-            # Create a tensor of size num_experts filled with -1
-            self.expert_map_cpu = torch.full((self.num_experts,), -1, dtype=torch.int32)
-            # Create a expert map for the local experts
-            self.expert_map_cpu[
-                self.moe_ep_rank
-                * self.num_local_experts : (self.moe_ep_rank + 1)
-                * self.num_local_experts
-            ] = torch.arange(0, self.num_local_experts, dtype=torch.int32, device="cpu")
-            if not self.enable_flashinfer_cutlass_moe:
-                self.expert_map_gpu = self.expert_map_cpu.to(device="cuda")
+        assert (num_experts - num_fused_shared_experts) % self.moe_ep_size == 0         
+        self.num_local_experts, self.expert_map_cpu = self.determine_expert_map()
+        self.expert_mask_gpu = None
+        self.expert_map_gpu = None
+        # expert_mask A tensor of shape like expert_map, for example expert_mask = [0, 1, 1, 1, 1, 0] 
+        # expert_id from 1-3 is valid and will be processed, while expert_id==0, expert_id == 4 will be masked out
+        if _use_aiter and self.expert_map_cpu is not None:
+            expert_mask = ((self.expert_map_cpu >= 0) & (self.expert_map_cpu < self.num_experts)).to(torch.int32)
+            self.expert_mask_gpu = expert_mask.to(device="cuda")
+        # if use flashinfer_cutlass_moe or aiter do not need to map global expert_id to local expert_id
+        if not self.enable_flashinfer_cutlass_moe and not _use_aiter and self.expert_map_cpu is not None:
+            self.expert_map_gpu = self.expert_map_cpu.to(device="cuda")
 
         self.routed_scaling_factor = routed_scaling_factor
         assert intermediate_size % self.moe_tp_size == 0
@@ -171,6 +169,55 @@ class FusedMoE(torch.nn.Module):
             params_dtype=params_dtype,
             weight_loader=self.weight_loader,
         )
+
+    # Modifications: use determine_expert_map as a class internal function, 
+    # set 'global_num_experts' or '-1' for experts not assigned to the current rank.
+    def determine_expert_map(self) -> Tuple[int, Optional[torch.Tensor]]:
+        """
+        Calculates how many experts should be assigned to each rank for EP and
+        creates a mapping from global to local expert index. Experts are
+        distributed evenly across ranks. Any remaining are assigned to the
+        last rank.
+
+        Returns:
+            Tuple[int, Optional[torch.Tensor]]: A tuple containing:
+                - local_num_experts (int): The number of experts assigned
+                    to the current rank, including fused shared experts
+                - expert_map (Optional[torch.Tensor]): A tensor of shape
+                    (global_num_experts,) mapping from global to local index.
+                    Contains global_num_experts for experts not assigned to the current rank.
+                    Returns None if ep_size is 1.
+        """
+        ep_size = self.moe_ep_size
+        ep_rank = self.moe_ep_rank
+        global_num_experts = self.num_experts
+        num_local_shared_experts = self.num_fused_shared_experts
+
+        assert ep_size > 0
+        if ep_size == 1:
+            return (global_num_experts, None)
+
+        local_routed_experts = (global_num_experts - num_local_shared_experts) // ep_size
+
+        expert_map = torch.full(
+            (global_num_experts,), -1, dtype=torch.int32, device="cpu"
+        )
+        
+        if ep_rank < (ep_size - 1):
+            expert_map[
+                ep_rank * local_routed_experts : (ep_rank + 1) * local_routed_experts
+            ] = torch.arange(0, local_routed_experts, dtype=torch.int32, device="cpu")
+            
+            if num_local_shared_experts > 0:
+                expert_map[-num_local_shared_experts:] = torch.arange(
+                    local_routed_experts, local_routed_experts + num_local_shared_experts, dtype=torch.int32, device="cpu")
+        else:
+            left_num_experts = global_num_experts - ep_rank * local_routed_experts
+
+            expert_map[-left_num_experts:] = torch.arange(
+                0, left_num_experts, dtype=torch.int32, device="cpu")
+            
+        return (local_routed_experts + num_local_shared_experts, expert_map)
 
     def _load_per_tensor_weight_scale(
         self,
@@ -428,7 +475,7 @@ class FusedMoE(torch.nn.Module):
         expert_id: int,
     ) -> None:
         expert_id = self._map_global_expert_id_to_local_expert_id(expert_id)
-        if expert_id == -1:
+        if expert_id < 0 or expert_id >= self.num_experts:
             return
         self._weight_loader_impl(
             param=param,

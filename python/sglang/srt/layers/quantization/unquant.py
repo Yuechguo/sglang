@@ -262,6 +262,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                         if activation == "silu"
                         else ActivationType.Gelu
                     ),
+                    expert_mask=layer.expert_mask_gpu,
                 )
             else:
                 from sglang.srt.layers.moe.fused_moe_triton.fused_moe import (
