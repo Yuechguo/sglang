@@ -351,11 +351,10 @@ class CudaGraphRunner:
 
     def capture(self) -> None:
         profile_context = empty_context()
-        if self.enable_profile_cuda_graph:
-            profile_context = profile(
-                activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-                record_shapes=True,
-            )
+        profile_context = profile(
+            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+            record_shapes=True,
+        )
 
         with graph_capture() as graph_capture_context:
             with profile_context as prof:
@@ -398,18 +397,17 @@ class CudaGraphRunner:
                     # Save gemlite cache after each capture
                     save_gemlite_cache()
 
-        if self.enable_profile_cuda_graph:
-            log_message = (
-                "Sorted by CUDA Time:\n"
-                + prof.key_averages(group_by_input_shape=True).table(
-                    sort_by="cuda_time_total", row_limit=10
-                )
-                + "\n\nSorted by CPU Time:\n"
-                + prof.key_averages(group_by_input_shape=True).table(
-                    sort_by="cpu_time_total", row_limit=10
-                )
+        log_message = (
+            "Sorted by CUDA Time:\n"
+            + prof.key_averages(group_by_input_shape=True).table(
+                sort_by="cuda_time_total", row_limit=10
             )
-            logger.info(log_message)
+            + "\n\nSorted by CPU Time:\n"
+            + prof.key_averages(group_by_input_shape=True).table(
+                sort_by="cpu_time_total", row_limit=10
+            )
+        )
+        logger.info(log_message)
 
 
     def capture_one_batch_size(self, bs: int, forward: Callable):
