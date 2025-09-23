@@ -42,7 +42,7 @@ _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
 
 if _use_aiter:
     import aiter
-    from aiter import gemm_a8w8_blockscale, get_hip_quant, gemm_a8w8_bpreshuffle
+    from aiter import gemm_a8w8_blockscale, gemm_a8w8_bpreshuffle, get_hip_quant
 
     aiter_per1x128_quant = get_hip_quant(aiter.QuantType.per_1x128)
 
@@ -69,6 +69,7 @@ def use_rowwise_torch_scaled_mm():
         # are time consuming.
         return get_device_capability() >= (9, 4) and _TORCH_VERSION_TUPLE >= (2, 7, 0)
     return False
+
 
 USE_ROWWISE_TORCH_SCALED_MM = use_rowwise_torch_scaled_mm()
 
@@ -608,7 +609,7 @@ def apply_fp8_linear(
                 and (USE_ROWWISE_TORCH_SCALED_MM or _use_aiter)
             ):
                 # into this sector means use dynamic per-token-per-channel quant
-                # per-token scale quant for input matrix, every row(one token) have one scale factor 
+                # per-token scale quant for input matrix, every row(one token) have one scale factor
                 # per-channel scale quant for weight matrix, every col(one channel) have one scale factor
                 if _use_aiter:
                     # gemm_a8w8_bpreshuffle(XQ, WQ, x_scale, w_scale, dtype)
@@ -622,10 +623,13 @@ def apply_fp8_linear(
                         WQ=weight,
                         x_scale=x_scale,
                         w_scale=weight_scale,
-                        dtype=input.dtype)
+                        dtype=input.dtype,
+                    )
                     if bias is not None:
                         output += bias
-                    return _process_scaled_mm_output(output, input_2d.shape, [*input.shape[:-1], weight.shape[0]])
+                    return _process_scaled_mm_output(
+                        output, input_2d.shape, [*input.shape[:-1], weight.shape[0]]
+                    )
                 else:
                     # For now validated on ROCm platform
                     # fp8 rowwise scaling in torch._scaled_mm is introduced in
@@ -642,7 +646,9 @@ def apply_fp8_linear(
                         scale_b=weight_scale.t(),
                         bias=bias,
                     )
-                    return _process_scaled_mm_output(output, input_2d.shape, output_shape)
+                    return _process_scaled_mm_output(
+                        output, input_2d.shape, output_shape
+                    )
             else:
                 # Fallback for channelwise case, where we use unfused DQ
                 # due to limitations with scaled_mm
@@ -684,12 +690,22 @@ def apply_fp8_linear(
                 # TODO(kkhuang): temporarily enforce per-tensor activation scaling if weight is per-tensor scaling
                 # final solution should be: 1. add support to per-tensor activation scaling.
                 # 2. solve the torch.compile error from weight_scale.numel() == 1 and x_scale.numel() > 1 (below line#308)
-                if _is_hip and weight_scale.numel() == 1:
-                    qinput, x_scale = ops.scaled_fp8_quant(
-                        input_2d,
-                        input_scale,
-                        use_per_token_if_dynamic=use_per_token_if_dynamic,
-                    )
+                if _is_hip:
+                    if weight_scale.numel() == 1:
+                        qinput, x_scale = ops.scaled_fp8_quant(
+                            input_2d,
+                            input_scale,
+                            use_per_token_if_dynamic=use_per_token_if_dynamic,
+                        )
+                    else:
+                        # for quark ptpc
+                        # Maybe apply padding to output, see comment in __init__
+                        qinput, x_scale = ops.scaled_fp8_quant(  # here
+                            input_2d,
+                            input_scale,
+                            num_token_padding=output_padding,
+                            use_per_token_if_dynamic=use_per_token_if_dynamic,
+                        )
                 else:
                     qinput, x_scale = per_token_group_quant_fp8(
                         input_2d, group_size=input_2d.shape[1]
@@ -739,6 +755,52 @@ def apply_fp8_linear(
                 bias=bias,
             )
             return _process_scaled_mm_output(output, input_2d.shape, output_shape)
+
+        elif (
+            use_per_token_if_dynamic
+            and not per_tensor_weights
+            and not per_tensor_activations
+            and (USE_ROWWISE_TORCH_SCALED_MM or _use_aiter)
+        ):
+            # into this sector means use dynamic per-token-per-channel quant
+            # per-token scale quant for input matrix, every row(one token) have one scale factor
+            # per-channel scale quant for weight matrix, every col(one channel) have one scale factor
+            if _use_aiter:
+                # gemm_a8w8_bpreshuffle(XQ, WQ, x_scale, w_scale, dtype)
+                # XQ -> input tensor, shape = (m, k)
+                # WQ -> weight tensor, shape = (n, k), with preshuffe get better perf
+                # x_scale -> input scale tensor, shape = (m, 1)
+                # w_scale -> weight scale tensor, shape = (n ,1)
+                # dtype -> output dtype
+                output = gemm_a8w8_bpreshuffle(
+                    XQ=qinput,
+                    WQ=weight,
+                    x_scale=x_scale,
+                    w_scale=weight_scale,
+                    dtype=input.dtype,
+                )
+                if bias is not None:
+                    output += bias
+                return _process_scaled_mm_output(
+                    output, input_2d.shape, [*input.shape[:-1], weight.shape[0]]
+                )
+            else:
+                # For now validated on ROCm platform
+                # fp8 rowwise scaling in torch._scaled_mm is introduced in
+                # https://github.com/pytorch/pytorch/pull/144432 using hipBLASLt
+                # and ROCm 6.3, which only exists in torch 2.7 and above.
+                # For CUDA platform please validate if the
+                # torch._scaled_mm support rowwise scaled GEMM
+                # Fused GEMM_DQ Rowwise GEMM
+                output = torch._scaled_mm(
+                    qinput,
+                    weight,
+                    out_dtype=input.dtype,
+                    scale_a=x_scale,
+                    scale_b=weight_scale.t(),
+                    bias=bias,
+                )
+                return _process_scaled_mm_output(output, input_2d.shape, output_shape)
 
         else:
             # Fallback for channelwise case, where we use unfused DQ
