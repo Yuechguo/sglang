@@ -29,6 +29,8 @@ __all__ = ["CompressedTensorsW8A8Fp8"]
 _is_hip = is_hip()
 _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
 
+if _use_aiter:
+    from aiter.ops.shuffle import shuffle_weight
 
 from sglang.srt.layers.quantization.utils import requantize_with_max_scale
 
@@ -106,7 +108,6 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             layer.input_scale = None
 
         if _use_aiter:
-            from aiter.ops.shuffle import shuffle_weight
 
             # keep the weight as (N, K)
             layer.weight = Parameter(
