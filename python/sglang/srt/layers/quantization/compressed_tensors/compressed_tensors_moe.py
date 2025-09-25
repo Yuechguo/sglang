@@ -21,7 +21,15 @@ from sglang.srt.layers.quantization.utils import (
     per_tensor_dequantize,
     replace_parameter,
 )
-from sglang.srt.utils import get_bool_env_var, is_cpu, is_cuda, is_hip, is_npu, set_weight_attrs, get_int_env_var
+from sglang.srt.utils import (
+    get_bool_env_var,
+    get_int_env_var,
+    is_cpu,
+    is_cuda,
+    is_hip,
+    is_npu,
+    set_weight_attrs,
+)
 
 _is_hip = is_hip()
 _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
@@ -37,7 +45,7 @@ if _is_hip and _use_aiter:
     from aiter import ActivationType, QuantType
     from aiter.fused_moe import fused_moe
     from aiter.ops.shuffle import shuffle_weight
-    
+
 
 try:
     import vllm
@@ -287,50 +295,49 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 # pad w13_weight_scale
                 with torch.no_grad():
                     part1 = layer.w13_weight_scale.data[:, :N, :]
-                    part2 = layer.w13_weight_scale.data[:, N:, :] 
+                    part2 = layer.w13_weight_scale.data[:, N:, :]
                     # 1. pad part1
                     part1_padded = torch.nn.functional.pad(
-                        part1, 
+                        part1,
                         (0, 0, 0, pad_size, 0, 0),  # pad on right on dim 1
-                        mode='constant', 
-                        value=0
-                        )
+                        mode="constant",
+                        value=0,
+                    )
                     # 2. pad part2
                     part2_padded = torch.nn.functional.pad(
-                        part2, 
+                        part2,
                         (0, 0, 0, pad_size, 0, 0),  # pad on right on dim 1
-                        mode='constant', 
-                        value=0
+                        mode="constant",
+                        value=0,
                     )
 
                     # 3. concat part1 and part2
-                    padded_w13_weight_scale = torch.cat([part1_padded, part2_padded], dim=1)
+                    padded_w13_weight_scale = torch.cat(
+                        [part1_padded, part2_padded], dim=1
+                    )
                     layer.w13_weight_scale = torch.nn.Parameter(
                         padded_w13_weight_scale,
                         requires_grad=False,
                     )
                     torch.cuda.empty_cache()
 
-
             with torch.no_grad():
                 # Pre-shuffle weights
-                part1 = layer.w13_weight.data[:, :N, :]  # 第一部分: [1..192]，shape: [128, 192, 512]
-                part2 = layer.w13_weight.data[:, N:, :]  # 第二部分: [193..384]，shape: [128, 192, 512]
+                part1 = layer.w13_weight.data[
+                    :, :N, :
+                ]  # 第一部分: [1..192]，shape: [128, 192, 512]
+                part2 = layer.w13_weight.data[
+                    :, N:, :
+                ]  # 第二部分: [193..384]，shape: [128, 192, 512]
 
                 # 1. pad part1
                 part1_padded = torch.nn.functional.pad(
-                    part1, 
-                    (0, 0, 0, pad_size, 0, 0),
-                    mode='constant', 
-                    value=0
+                    part1, (0, 0, 0, pad_size, 0, 0), mode="constant", value=0
                 )
 
                 # 2. pad part2
                 part2_padded = torch.nn.functional.pad(
-                    part2, 
-                    (0, 0, 0, pad_size, 0, 0),
-                    mode='constant', 
-                    value=0
+                    part2, (0, 0, 0, pad_size, 0, 0), mode="constant", value=0
                 )
 
                 # 3. concate
@@ -341,10 +348,12 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                     requires_grad=False,
                 )
                 torch.cuda.empty_cache()
-                padded_w2_wight = F.pad(layer.w2_weight.data, (0, pad_size, 0, 0, 0, 0),"constant", 0)
+                padded_w2_wight = F.pad(
+                    layer.w2_weight.data, (0, pad_size, 0, 0, 0, 0), "constant", 0
+                )
                 layer.w2_weight = torch.nn.Parameter(
                     shuffle_weight(padded_w2_wight, (16, 16)),
-                    requires_grad=False,    
+                    requires_grad=False,
                 )
                 torch.cuda.empty_cache()
 
@@ -361,26 +370,25 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         routed_scaling_factor: Optional[float] = None,
     ) -> torch.Tensor:
         from sglang.srt.layers.moe.fused_moe_triton import fused_experts
+
         if _use_aiter:
             topk_weights, topk_ids, _ = topk_output
             return fused_moe(
-                    x,
-                    layer.w13_weight,
-                    layer.w2_weight,
-                    topk_weights,
-                    topk_ids,
-                    quant_type=QuantType.per_Token,
-                    w1_scale=layer.w13_weight_scale,
-                    w2_scale=layer.w2_weight_scale,
-                    a1_scale=layer.w13_input_scale,
-                    a2_scale=layer.w2_input_scale,
-                    activation=(
-                        ActivationType.Silu
-                        if activation == "silu"
-                        else ActivationType.Gelu
-                    ),
-                    expert_mask=layer.expert_mask_gpu,
-                )
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                topk_weights,
+                topk_ids,
+                quant_type=QuantType.per_Token,
+                w1_scale=layer.w13_weight_scale,
+                w2_scale=layer.w2_weight_scale,
+                a1_scale=layer.w13_input_scale,
+                a2_scale=layer.w2_input_scale,
+                activation=(
+                    ActivationType.Silu if activation == "silu" else ActivationType.Gelu
+                ),
+                expert_mask=layer.expert_mask_gpu,
+            )
         return fused_experts(
             x,
             layer.w13_weight,

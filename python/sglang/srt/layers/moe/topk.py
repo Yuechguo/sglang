@@ -118,13 +118,14 @@ class TritonKernelTopKOutput(NamedTuple):
 
 
 class TopK(CustomOp):
-    '''
+    """
     Parameters:
     --top_k: The all number of top experts selected per token, including the fused shared expert(s).
-    --num_fused_shared_experts: num of shared experts, can be acitvate both in TP or EP mode.
+    --num_fused_shared_experts: num of shared experts, can be activate both in TP or EP mode.
     --routed_scaling_factor: the scaling factor for routed experts in topk_weights.
     --fused_shared_experts_scaling_factor: scaling factor for fused shared experts.
-    '''
+    """
+
     def __init__(
         self,
         top_k: int,
@@ -421,7 +422,9 @@ def grouped_topk_gpu(
             device=topk_ids.device,
         )
         if routed_scaling_factor is not None:
-            topk_weights[:, -1] = topk_weights[:, :-1].sum(dim=-1) / routed_scaling_factor 
+            topk_weights[:, -1] = (
+                topk_weights[:, :-1].sum(dim=-1) / routed_scaling_factor
+            )
 
     if renormalize:
         topk_weights_sum = (
@@ -515,7 +518,9 @@ def biased_grouped_topk_impl(
             device=topk_ids.device,
         )
         if routed_scaling_factor is not None:
-            topk_weights[:, -1] = topk_weights[:, :-1].sum(dim=-1) / routed_scaling_factor 
+            topk_weights[:, -1] = (
+                topk_weights[:, :-1].sum(dim=-1) / routed_scaling_factor
+            )
 
     if renormalize:
         topk_weights_sum = (
@@ -755,28 +760,39 @@ def select_experts(
             topk=num_routed_topk,
             renormalize=renormalize,
         )
-    
-    # TODO: fused ops of shared experts in topk fucntion itself when num_fused_shared_experts > 0.
+
+    # TODO: fused ops of shared experts in topk function itself when num_fused_shared_experts > 0.
     if num_fused_shared_experts > 0:
         M, N = router_logits.shape
-        scale_factor = 1.0 if fused_shared_experts_scaling_factor is None else fused_shared_experts_scaling_factor
-        topk_ids= torch.cat([
-            topk_ids,
-            torch.arange(
-                N, 
-                N + num_fused_shared_experts,
-                dtype=topk_ids.dtype,
-                device=topk_ids.device).expand(M, -1)
-        ], dim=1)
-        topk_weights = torch.cat([
-            topk_weights,
-            torch.full(
-                (topk_weights.size(0), num_fused_shared_experts),
-                scale_factor,
-                dtype=topk_weights.dtype,
-                device=topk_weights.device
-            )
-        ], dim=1)
+        scale_factor = (
+            1.0
+            if fused_shared_experts_scaling_factor is None
+            else fused_shared_experts_scaling_factor
+        )
+        topk_ids = torch.cat(
+            [
+                topk_ids,
+                torch.arange(
+                    N,
+                    N + num_fused_shared_experts,
+                    dtype=topk_ids.dtype,
+                    device=topk_ids.device,
+                ).expand(M, -1),
+            ],
+            dim=1,
+        )
+        topk_weights = torch.cat(
+            [
+                topk_weights,
+                torch.full(
+                    (topk_weights.size(0), num_fused_shared_experts),
+                    scale_factor,
+                    dtype=topk_weights.dtype,
+                    device=topk_weights.device,
+                ),
+            ],
+            dim=1,
+        )
 
     get_global_expert_distribution_recorder().on_select_experts(topk_ids=topk_ids)
 
