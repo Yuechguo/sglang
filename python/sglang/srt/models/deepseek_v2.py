@@ -31,7 +31,6 @@ from transformers import PretrainedConfig
 from sglang.srt.distributed import (
     get_moe_expert_parallel_world_size,
     get_tensor_model_parallel_world_size,
-    get_moe_expert_parallel_world_size,
     parallel_state,
     tensor_model_parallel_all_reduce,
 )
@@ -105,6 +104,7 @@ from sglang.srt.utils import (
     bind_or_assign,
     cpu_has_amx_support,
     get_bool_env_var,
+    get_device_capability,
     get_device_sm,
     get_int_env_var,
     is_cpu,
@@ -114,7 +114,6 @@ from sglang.srt.utils import (
     is_non_idle_and_non_empty,
     log_info_on_rank0,
     use_intel_amx_backend,
-    get_device_capability
 )
 
 _is_hip = is_hip()
@@ -313,10 +312,10 @@ class DeepseekV2MoE(nn.Module):
         fused_shared_experts_scaling_factor = None
         if self.moe_ep_size > 1 and self.num_fused_shared_experts > 0:
             # if enable_ep_moe tp_szie == ep_size, every gpu get shared experts gemm output
-            # so we scale with 1 / self.moe_ep_size in ep mode which will make it equalation as in tp mode 
+            # so we scale with 1 / self.moe_ep_size in ep mode which will make it equalation as in tp mode
             # with fused_shared_experts
             fused_shared_experts_scaling_factor = 1.0 / float(self.moe_ep_size)
-        
+
         self.topk = (
             TopK(
                 top_k=config.num_experts_per_tok + self.num_fused_shared_experts,
@@ -2136,17 +2135,17 @@ class DeepseekV2ForCausalLM(nn.Module):
             or self.config.n_shared_experts != 1
         ):
             disable_reason = "Config not support fused shared expert(s)."
-        
+
         if (
-            disable_reason is None 
+            disable_reason is None
             and (not _is_cuda or get_device_capability() < (8, 0))
             and (not _is_hip or get_device_capability() < (9, 4))
-        ) :
+        ):
             disable_reason = (
                 "Only Deepseek V3/R1 on NV-platform with capability >= 80 "
                 "or AMD-platform with capability >= 94 can use shared experts fusion optimization."
             )
-        
+
         if (
             disable_reason is None
             and global_server_args_dict["moe_a2a_backend"].is_deepep()
@@ -2158,10 +2157,12 @@ class DeepseekV2ForCausalLM(nn.Module):
         if (
             disable_reason is None
             and get_moe_expert_parallel_world_size() > 1
-            and global_server_args_dict["shared_expert_mode"] != "fused" 
+            and global_server_args_dict["shared_expert_mode"] != "fused"
         ):
-            disable_reason = "Deepseek V3/R1 not used fused shared experts in ep moe mode"
-                
+            disable_reason = (
+                "Deepseek V3/R1 not used fused shared experts in ep moe mode"
+            )
+
         if disable_reason is not None:
             global_server_args_dict["disable_shared_experts_fusion"] = True
             self.num_fused_shared_experts = 0
