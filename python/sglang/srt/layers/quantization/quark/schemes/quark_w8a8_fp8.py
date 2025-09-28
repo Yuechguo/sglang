@@ -175,16 +175,17 @@ class QuarkW8A8Fp8(QuarkScheme):
         x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        if not _use_aiter:
+            return apply_fp8_linear(
+                x,
+                layer.weight,
+                layer.weight_scale,
+                input_scale=layer.input_scale,
+                bias=bias,
+                cutlass_fp8_supported=self.cutlass_fp8_supported,
+                use_per_token_if_dynamic=self.per_token,
+            )
 
-        # return apply_fp8_linear(
-        #     x,
-        #     layer.weight,
-        #     layer.weight_scale,
-        #     input_scale=layer.input_scale,
-        #     bias=bias,
-        #     cutlass_fp8_supported=self.cutlass_fp8_supported,
-        #     use_per_token_if_dynamic=self.per_token,
-        # )
         return apply_fp8_ptpc_linear(
             input=x,
             weight=layer.weight,

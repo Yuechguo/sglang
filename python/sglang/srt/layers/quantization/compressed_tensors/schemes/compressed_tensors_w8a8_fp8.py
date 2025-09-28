@@ -177,6 +177,17 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        if not _use_aiter:
+            return apply_fp8_linear(
+                input=x,
+                weight=layer.weight,
+                weight_scale=layer.weight_scale,
+                input_scale=layer.input_scale,
+                bias=bias,
+                use_per_token_if_dynamic=True,
+                compressed_tensor_quant=True,
+            )
+
         return apply_fp8_ptpc_linear(
             input=x,
             weight=layer.weight,
@@ -186,13 +197,3 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             use_per_token_if_dynamic=True,
             compressed_tensor_quant=True,
         )
-
-        # return apply_fp8_linear(
-        #     input=x,
-        #     weight=layer.weight,
-        #     weight_scale=layer.weight_scale,
-        #     input_scale=layer.input_scale,
-        #     bias=bias,
-        #     use_per_token_if_dynamic=True,
-        #     compressed_tensor_quant=True,
-        # )
