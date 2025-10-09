@@ -291,6 +291,10 @@ def _dp_gather_via_all_gather(
     forward_batch: ForwardBatch,
     is_partial: bool,
 ):
+    if get_attention_tp_size() == 1:
+        get_tp_group().all_gather_into_tensor(global_tokens, local_tokens)
+        return
+
     if not is_partial:
         if get_attention_tp_rank() != 0:
             local_tokens.fill_(0)
@@ -338,6 +342,7 @@ def dp_scatter(
     global_tokens: torch.Tensor,  # input
     forward_batch: ForwardBatch,
 ):
+    # TP4dp2 CUDAGRAPH coredump （TODO）
     # local_num_tokens is not necessarily the same as local_tokens.shape[0],
     # since local_tokens may be padded for cuda graph
     local_start_pos, local_num_tokens = get_dp_local_info(forward_batch)
