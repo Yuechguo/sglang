@@ -312,7 +312,11 @@ inline bool getEnvEnablePDL() {
 #ifndef USE_ROCM
 #define WARP_SIZE 32
 #else
-#define WARP_SIZE warpSize  // 64
+#if defined(__GFX9__) || !defined(__HIP_DEVICE_COMPILE__)
+#define WARP_SIZE 64
+#else
+#define WARP_SIZE 32
+#endif
 #endif
 
 #if defined(__HIP_PLATFORM_AMD__)
