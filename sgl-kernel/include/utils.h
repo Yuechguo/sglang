@@ -315,7 +315,7 @@ inline bool getEnvEnablePDL() {
 #if defined(__GFX9__) || !defined(__HIP_DEVICE_COMPILE__)
 #define WARP_SIZE 64
 #else
-#define WARP_SIZE 32
+#error "Unsupported configuration for WARP_SIZE"
 #endif
 #endif
 
