@@ -259,6 +259,9 @@ class LayerCommunicator:
                             None,
                             residual,
                         )
+                    elif self.input_layernorm is None:
+                        hidden_states += residual
+                        residual = hidden_states
                     else:
                         hidden_states, residual = self.input_layernorm(
                             hidden_states, residual
