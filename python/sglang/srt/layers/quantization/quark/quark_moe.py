@@ -473,27 +473,44 @@ class QuarkW8A8FP8MoEMethod(QuarkMoEMethod):
 
         if (
             _use_aiter
-            and self.is_weight_per_channel
-            and moe_runner_config.apply_router_weight_on_input
+            # and self.is_weight_per_channel
+            # and moe_runner_config.apply_router_weight_on_input
         ):
             topk_weights, topk_ids, _ = topk_output
-            output = rocm_fused_experts_tkw1(
-                hidden_states=x,
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                activation=moe_runner_config.activation,
-                apply_router_weight_on_input=moe_runner_config.apply_router_weight_on_input,
-                use_fp8_w8a8=True,
-                per_channel_quant=self.is_weight_per_channel,
+            output = fused_moe(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                topk_weights,
+                topk_ids,
+                quant_type=QuantType.per_Token,
                 w1_scale=layer.w13_weight_scale,
                 w2_scale=layer.w2_weight_scale,
                 a1_scale=layer.w13_input_scale,
                 a2_scale=layer.w2_input_scale,
+                activation=(
+                    ActivationType.Silu if moe_runner_config.activation == "silu" else ActivationType.Gelu
+                ),
+                # expert_mask=layer.expert_mask_gpu,
             )
+            # output = rocm_fused_experts_tkw1(
+            #     hidden_states=x,
+            #     w1=layer.w13_weight,
+            #     w2=layer.w2_weight,
+            #     topk_weights=topk_weights,
+            #     topk_ids=topk_ids,
+            #     activation=moe_runner_config.activation,
+            #     apply_router_weight_on_input=moe_runner_config.apply_router_weight_on_input,
+            #     use_fp8_w8a8=True,
+            #     per_channel_quant=self.is_weight_per_channel,
+            #     w1_scale=layer.w13_weight_scale,
+            #     w2_scale=layer.w2_weight_scale,
+            #     a1_scale=layer.w13_input_scale,
+            #     a2_scale=layer.w2_input_scale,
+            # )
             return StandardCombineInput(hidden_states=output)
         else:
+            raise ValueError
             quant_info = TritonMoeQuantInfo(
                 w13_weight=layer.w13_weight,
                 w2_weight=layer.w2_weight,
