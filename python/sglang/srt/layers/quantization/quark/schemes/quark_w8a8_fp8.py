@@ -4,6 +4,7 @@ from typing import Any, Callable, Optional, cast
 
 import torch
 from torch.nn import Parameter
+import torch.nn.functional as F
 
 from sglang.srt.layers.parameter import (
     ChannelQuantScaleParameter,
@@ -97,8 +98,14 @@ class QuarkW8A8Fp8(QuarkScheme):
             if self.per_token:
                 weight_scale = weight_scale.view(-1, 1)
             if _use_aiter:
+                # print(f"{weight.shape=}")
+                K = weight.shape[-1]
+                padding_size = 128
+                pad_size = (padding_size - (K%padding_size)) % padding_size
+                pad_weight = F.pad(weight, (0, pad_size))
+
                 layer.weight = Parameter(
-                    shuffle_weight(weight, (16, 16)).t(), requires_grad=False
+                    shuffle_weight(pad_weight, (16, 16)).t(), requires_grad=False
                 )
             else:
                 layer.weight = Parameter(weight.t(), requires_grad=False)
