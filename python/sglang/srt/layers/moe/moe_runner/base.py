@@ -34,6 +34,7 @@ class MoeRunnerConfig:
     top_k: Optional[int] = None
     num_fused_shared_experts: Optional[int] = None
     params_dtype: Optional[torch.dtype] = None
+    expert_map: Optional[torch.tensor] = None
 
     # Runner configuration
     activation: str = "silu"

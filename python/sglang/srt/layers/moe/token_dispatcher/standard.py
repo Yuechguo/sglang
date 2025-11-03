@@ -60,30 +60,13 @@ class StandardDispatcher(BaseDispatcher):
         self.num_experts = moe_runner_config.num_experts
         self.num_local_experts = moe_runner_config.num_local_experts
         self.moe_ep_rank = get_moe_expert_parallel_rank()
-        self.local_expert_mapping = None
+        self.local_expert_mapping = None if self.enable_flashinfer_cutlass_moe else moe_runner_config.expert_map
 
     def dispatch(
         self, hidden_states: torch.Tensor, topk_output: TopKOutput
     ) -> DispatchOutput:
 
-        if (
-            self.moe_ep_size > 1
-            and not self.enable_flashinfer_cutlass_moe
-            and TopKOutputChecker.format_is_standard(topk_output)
-        ):
-            if self.local_expert_mapping is None:
-                self.local_expert_mapping = torch.full(
-                    (self.num_experts,), -1, dtype=torch.int32, device="cuda"
-                )
-                self.local_expert_mapping[
-                    self.moe_ep_rank
-                    * self.num_local_experts : (self.moe_ep_rank + 1)
-                    * self.num_local_experts
-                ] = torch.arange(
-                    0, self.num_local_experts, dtype=torch.int32, device="cuda"
-                )
-
-        if self.local_expert_mapping is not None:
+        if TopKOutputChecker.format_is_standard(topk_output) and self.local_expert_mapping is not None:
             if TopKOutputChecker.format_is_standard(topk_output):
                 topk_output = topk_output._replace(
                     topk_ids=self.local_expert_mapping[topk_output.topk_ids]

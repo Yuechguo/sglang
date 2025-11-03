@@ -58,6 +58,7 @@ if is_flashinfer_available():
 _is_hip = is_hip()
 _is_cpu_amx_available = cpu_has_amx_support()
 _is_cpu = is_cpu()
+_use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
 
 
 # Try to import FP4 TRTLLM function if flashinfer is available
@@ -108,16 +109,22 @@ class FusedMoE(torch.nn.Module):
     Note: Mixtral uses w1, w2, and w3 for gate, up, and down_proj. We
     copy that naming convention here and handle any remapping in the
     load_weights function in each model implementation.
+    
+    Note1: when fused_shared experts > 0, In TP mode, the shared_expert is automatically 
+    partitioned along with the routing experts; in EP mode, the shared_expert exists on 
+    every rank of the EP. And the topk_ids return values include the shared_expert_id that 
+    is always activated.
 
     Args:
-        num_experts: Number of experts in the model
-        top_k: Number of experts selected for each token
+        num_experts: Number of all experts in the model, including the fused_shared experts.
+        top_k: Number of experts selected for each token, including the fused_shared experts.
         hidden_size: Input hidden state size of the transformer
         intermediate_size: Intermediate size of the experts
         params_dtype: Data type for the parameters.
         reduce_results: Whether to apply all_reduce on the output of the layer
         quant_config: Quantization configuration.
         inplace: suggestion to compute inplace (modify input activation).
+        num_fused_shared_experts: num of shared expert to fused in FusedMoE or EPMoE mode
     """
 
     def __init__(
@@ -164,8 +171,29 @@ class FusedMoE(torch.nn.Module):
         self.moe_ep_rank = get_moe_expert_parallel_rank()
         self.moe_tp_size = get_moe_tensor_parallel_world_size()
         self.moe_tp_rank = get_moe_tensor_parallel_rank()
-        assert num_experts % self.moe_ep_size == 0
-        self.num_local_experts = num_experts // self.moe_ep_size
+        
+        self.routed_num_experts = num_experts - num_fused_shared_experts
+        assert self.routed_num_experts % self.moe_ep_size == 0
+        self.num_local_experts = self.routed_num_experts // self.moe_ep_size + self.num_fused_shared_experts
+        self.expert_map_cpu = None
+        # Calculates how many experts should be assigned to each rank for EP and creates a mapping from global to 
+        # local expert index. Experts are distributed evenly across ranks. Any remaining are assigned to the last rank.
+        if self.moe_ep_size > 0:
+            local_routed_experts = self.routed_num_experts // self.moe_ep_size
+            self.expert_map_cpu = torch.full(
+                (self.num_experts,), -1, dtype=torch.int32, device="cpu"
+            )   
+            if self.moe_ep_rank < (self.moe_ep_size - 1):
+                self.expert_map_cpu[
+                    self.moe_ep_rank * local_routed_experts : (self.moe_ep_rank + 1) * local_routed_experts
+                ] = torch.arange(0, local_routed_experts, dtype=torch.int32, device="cpu")     
+                if self.num_fused_shared_experts > 0:
+                    self.expert_map_cpu[-self.num_fused_shared_experts:] = torch.arange(
+                        local_routed_experts, local_routed_experts + self.num_fused_shared_experts, dtype=torch.int32, device="cpu")
+            else:
+                left_num_experts = self.num_experts - self.moe_ep_rank * local_routed_experts
+                self.expert_map_cpu[-left_num_experts:] = torch.arange(
+                    0, left_num_experts, dtype=torch.int32, device="cpu")
 
         assert intermediate_size % self.moe_tp_size == 0
         self.intermediate_size_per_partition = intermediate_size // self.moe_tp_size
@@ -194,6 +222,7 @@ class FusedMoE(torch.nn.Module):
             top_k=top_k,
             num_fused_shared_experts=num_fused_shared_experts,
             params_dtype=params_dtype,
+            expert_map=self.expert_map_cpu.to(device='cuda'),
             activation=activation,
             apply_router_weight_on_input=apply_router_weight_on_input,
             inplace=inplace,
@@ -460,12 +489,9 @@ class FusedMoE(torch.nn.Module):
             expert_data.copy_(loaded_weight)
 
     def _map_global_expert_id_to_local_expert_id(self, expert_id: int) -> int:
-        start_idx = self.moe_ep_rank * self.num_local_experts
-        end_idx = (self.moe_ep_rank + 1) * self.num_local_experts
-        if start_idx <= expert_id < end_idx:
-            return expert_id - start_idx
-        else:
-            return -1
+        if self.expert_map_cpu is None:
+            return expert_id
+        return self.expert_map_cpu[expert_id]
 
     def weight_loader(
         self,
