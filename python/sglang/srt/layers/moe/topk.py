@@ -477,7 +477,7 @@ def fused_topk_cpu(
         topk_weights[:, -num_fused_shared_experts:] = topk_weights_sum * scale_factor
         
         if renormalize:
-            topk_weights =  topk_weights / topk_weights_sum
+            topk_weights = topk_weights / topk_weights_sum
     
     topk_ids = topk_ids_logical_to_physical(topk_ids, expert_location_dispatch_info)
     _mask_topk_ids_padded_region(topk_ids, num_token_non_padded)
@@ -512,12 +512,11 @@ def fused_topk(
 
     M, _ = hidden_states.shape
 
-    routed_topk = topk - num_fused_shared_experts
     topk_weights = torch.empty(
-        M, routed_topk, dtype=torch.float32, device=hidden_states.device
+        M, topk, dtype=torch.float32, device=hidden_states.device
     )
-    topk_ids = torch.empty(M, routed_topk, dtype=torch.int32, device=hidden_states.device)
-
+    topk_ids = torch.empty(M, topk, dtype=torch.int32, device=hidden_states.device)
+    # topk_softmax in sgl-kernel automatic sorting is enabled by default
     topk_softmax(
         topk_weights,
         topk_ids,
@@ -527,28 +526,21 @@ def fused_topk(
     
     if num_fused_shared_experts:
         num_token, num_experts = gating_output.shape
-        topk_ids = torch.cat([
-            topk_ids,
-            torch.arange(
-                num_experts, 
-                num_experts + num_fused_shared_experts,
-                dtype=topk_ids.dtype,
-                device=topk_ids.device).expand(num_token, -1)
-        ], dim=1)
-
+        topk_ids[:, -num_fused_shared_experts:] = torch.arange(
+            num_experts, 
+            num_experts + num_fused_shared_experts,
+            dtype=topk_ids.dtype,
+            device=topk_ids.device).expand(num_token, -1)
+            
         scale_factor = 1.0 
         if routed_scaling_factor is not None:
             scale_factor = scale_factor / routed_scaling_factor
         if fused_shared_experts_scaling_factor is not None:
             scale_factor *= fused_shared_experts_scaling_factor
         
-        topk_weights_sum = topk_weights.sum(dim=-1, keepdim=True) 
-        source =  topk_weights_sum * scale_factor
-        topk_weights = torch.cat([
-            topk_weights,
-            source.repeat(1, num_fused_shared_experts)
-        ], dim=1)
-                
+        topk_weights_sum = topk_weights[:, :-num_fused_shared_experts].sum(dim=-1, keepdim=True)
+        topk_weights[:, -num_fused_shared_experts:] = topk_weights_sum * scale_factor
+        
         if renormalize:
             topk_weights = topk_weights / topk_weights_sum
 
