@@ -2721,6 +2721,8 @@ def apply_rotary_pos_emb_aiter(
 
 if _is_npu:
     apply_rotary_pos_emb = apply_rotary_pos_emb_npu
+elif _use_aiter:
+    apply_rotary_pos_emb = apply_rotary_pos_emb_aiter
 else:
     apply_rotary_pos_emb = apply_rotary_pos_emb_native
 
