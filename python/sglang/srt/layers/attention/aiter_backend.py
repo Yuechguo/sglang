@@ -607,8 +607,12 @@ class AiterAttnBackend(AttentionBackend):
             qo_indptr = self.forward_metadata.qo_indptr
             K_Buffer = forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id)
             V_Buffer = forward_batch.token_to_kv_pool.get_value_buffer(layer.layer_id)
-            kv_lora_rank = V_Buffer.shape[-1]
-            qk_rope_head_dim = K_Buffer.shape[-1] - kv_lora_rank
+            if layer.use_kv_padding_dim is None:      
+                kv_lora_rank = V_Buffer.shape[-1]
+                qk_rope_head_dim = K_Buffer.shape[-1] - kv_lora_rank
+            else:
+                kv_lora_rank = V_Buffer.shape[-1] - layer.use_kv_padding_dim 
+                qk_rope_head_dim = K_Buffer.shape[-1] - kv_lora_rank - layer.use_kv_padding_dim
             qk_nope_head_dim = k.shape[-1] - qk_rope_head_dim
             assert len(q.shape) == 3
             assert len(k.shape) == 3
@@ -634,9 +638,14 @@ class AiterAttnBackend(AttentionBackend):
                     return o
                 elif layer.qk_head_dim != (kv_lora_rank + qk_rope_head_dim):
                     K_Buffer = torch.index_select(K_Buffer, 0, kv_indices)
-                    kvc, k_pe = torch.split(
-                        K_Buffer, [kv_lora_rank, qk_rope_head_dim], dim=-1
-                    )
+                    if layer.use_kv_padding_dim is None: 
+                        kvc, k_pe = torch.split(
+                            K_Buffer, [kv_lora_rank, qk_rope_head_dim], dim=-1
+                        )
+                    else:
+                        kvc, _, k_pe = torch.split(
+                            K_Buffer, [kv_lora_rank, layer.use_kv_padding_dim, qk_rope_head_dim], dim=-1
+                        )
                     kvprefix = layer.kv_b_proj(kvc.contiguous())[0]
 
                     kvprefix = kvprefix.view(

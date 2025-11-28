@@ -62,6 +62,7 @@ class RadixAttention(nn.Module):
         attn_type: AttentionType = AttentionType.DECODER,
         use_irope: bool = False,
         prefix: str = "",
+        use_kv_padding_dim: Optional[int] = None,
     ):
         super().__init__()
         self.tp_q_head_num = num_heads
@@ -90,6 +91,7 @@ class RadixAttention(nn.Module):
         self.pos_encoding_mode = pos_encoding_mode
         self.logit_capping_method = logit_capping_method
         self.xai_temperature_len = -1
+        self.use_kv_padding_dim = use_kv_padding_dim
 
     def forward(
         self,

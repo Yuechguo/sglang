@@ -315,6 +315,9 @@ class ModelConfig:
             self.hf_text_config.hidden_size // self.hf_text_config.num_attention_heads,
         )
 
+        #only use for TBStars models
+        self.padding_kv_lora_rank = None
+        
         # FIXME: temporary special judge for MLA architecture
         if (
             "DeepseekV2ForCausalLM" in self.hf_config.architectures
@@ -346,6 +349,21 @@ class ModelConfig:
                 scaling_factor = self.hf_config.rope_scaling["factor"]
                 mscale = yarn_get_mscale(scaling_factor, float(mscale_all_dim))
                 self.scaling = self.scaling * mscale * mscale
+
+        elif ("TBStars2_5_ForCausalLM" in self.hf_config.architectures
+              or "TBStars2_5_ForCausalLMNextN" in self.hf_config.architectures):
+            self.head_dim = 128
+            self.attention_arch = AttentionArch.MLA
+            self.kv_lora_rank = self.hf_config.kv_lora_rank
+            if hasattr(self.hf_config, "padding_kv_lora_rank"):
+                self.padding_kv_lora_rank = self.hf_config.padding_kv_lora_rank
+            self.qk_nope_head_dim = self.hf_config.qk_nope_head_dim
+            self.qk_rope_head_dim = self.hf_config.qk_rope_head_dim
+            self.v_head_dim = self.hf_config.v_head_dim
+            self.q_lora_rank = self.hf_config.q_lora_rank
+            self.hybrid_norm = self.hf_config.hybrid_norm
+            self.scaling = 1 / math.sqrt(self.qk_nope_head_dim + self.qk_rope_head_dim)
+            self.architectures = self.hf_config.architectures
 
         elif "MiniCPM3ForCausalLM" in self.hf_config.architectures:
             self.head_dim = 128

@@ -1270,9 +1270,12 @@ class ModelRunner:
             num_layers = len(config.full_attention_layer_ids)
         else:
             num_layers = self.num_effective_layers
+
+        finall_kv_lora_rank = self.model_config.kv_lora_rank if self.model_config.padding_kv_lora_rank is None \
+                else self.model_config.padding_kv_lora_rank
         if self.use_mla_backend:
             cell_size = (
-                (self.model_config.kv_lora_rank + self.model_config.qk_rope_head_dim)
+                (finall_kv_lora_rank + self.model_config.qk_rope_head_dim)
                 * num_layers
                 * torch._utils._element_size(self.kv_cache_dtype)
             )
@@ -1282,7 +1285,7 @@ class ModelRunner:
                 cell_size = (cell_size // 2) + (
                     (
                         (
-                            self.model_config.kv_lora_rank
+                            finall_kv_lora_rank
                             + self.model_config.qk_rope_head_dim
                         )
                         // scale_block_size
@@ -1736,7 +1739,11 @@ class ModelRunner:
                 self.max_total_num_tokens,
                 page_size=self.page_size,
                 dtype=self.kv_cache_dtype,
-                kv_lora_rank=self.model_config.kv_lora_rank,
+                kv_lora_rank= 
+                    (   
+                        self.model_config.kv_lora_rank if self.model_config.padding_kv_lora_rank is None 
+                        else self.model_config.padding_kv_lora_rank
+                    ),
                 qk_rope_head_dim=self.model_config.qk_rope_head_dim,
                 layer_num=self.num_effective_layers,
                 device=self.device,
