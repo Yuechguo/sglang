@@ -29,6 +29,8 @@ try:
         flash_attn_varlen_func,
         mha_batch_prefill_func,
         paged_attention_ragged,
+        get_mla_metadata_info_v1,
+        get_mla_metadata_v1,
     )
     from aiter.mla import mla_decode_fwd, mla_prefill_fwd
 except ImportError:
@@ -814,7 +816,73 @@ class AiterAttnBackend(AttentionBackend):
             )
 
         if self.use_mla:
+            qo_indptr = self.forward_metadata.qo_indptr
+            kv_indices = self.forward_metadata.kv_indices
+            kv_indptr = self.forward_metadata.kv_indptr
+            batch_size = qo_indptr.shape[0]-1
+            seq_lens_qo = forward_batch.seq_lens
+            max_seqlen_qo = seq_lens_qo.max().item()
             k_buffer = forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id)
+            (
+                (work_meta_data_size, work_meta_data_type),
+                (work_indptr_size, work_indptr_type),
+                (work_info_set_size, work_info_set_type),
+                (reduce_indptr_size, reduce_indptr_type),
+                (reduce_final_map_size, reduce_final_map_type),
+                (reduce_partial_map_size, reduce_partial_map_type),
+            ) = get_mla_metadata_info_v1(
+                batch_size, # batch_size
+                max_seqlen_qo, # max_seqlen_qo
+                layer.tp_q_head_num, # num_head_qo
+                q.dtype,
+                k_buffer.dtype,
+                is_sparse=False,
+                fast_mode=True,
+            )
+            work_meta_data = torch.empty([2],
+                    dtype=torch.uint64,
+                    device=q.device)
+            num_q_heads = q.shape[1]
+            max_num_reqs = q.shape[0]
+            work_indptr = torch.empty(
+                work_indptr_size,
+                dtype=work_indptr_type,
+                device=q.device)
+            work_info_set = torch.empty(
+                work_info_set_size,
+                dtype=work_info_set_type,
+                device=q.device)
+            reduce_indptr = torch.empty(
+                reduce_indptr_size,
+                dtype=reduce_indptr_type,
+                device=q.device)
+            reduce_final_map = torch.empty(
+                reduce_final_map_size,
+                dtype=reduce_final_map_type,
+                device=q.device)
+            # print(f"{reduce_partial_map_size=}")
+            reduce_partial_map = torch.empty(
+                reduce_partial_map_size,
+                dtype=reduce_partial_map_type,
+                device=q.device)
+            # seq_lens_kv = (kv_indices.view(-1, 2048) != -1).sum(dim=-1)
+            # kv_indptr = torch.zeros(seq_lens_kv.shape[0]+1, dtype=cu_seqlens_q_new.dtype, device=cu_seqlens_q_new.device)
+            # kv_indptr[1:] = torch.cumsum(seq_lens_kv, dim=0)
+            get_mla_metadata_v1(
+                qo_indptr,
+                kv_indptr,
+                layer.tp_q_head_num,
+                1,
+                False,
+                work_meta_data,
+                work_info_set,
+                work_indptr,
+                reduce_indptr,
+                reduce_final_map,
+                reduce_partial_map,
+                fast_mode = False,
+                # split_params=self.split_params,
+            )
             mla_decode_fwd(
                 q.view(-1, layer.tp_q_head_num, layer.qk_head_dim),
                 k_buffer.view(-1, 1, 1, layer.qk_head_dim),
@@ -826,6 +894,12 @@ class AiterAttnBackend(AttentionBackend):
                 self.forward_metadata.max_q_len,
                 layer.scaling,
                 layer.logit_cap,
+                work_meta_data=work_meta_data,
+                work_indptr=work_indptr,
+                work_info_set=work_info_set,
+                reduce_indptr=reduce_indptr,
+                reduce_final_map=reduce_final_map,
+                reduce_partial_map=reduce_partial_map,
             )
             k_buffer = k_buffer.view(-1, 1, layer.qk_head_dim)
         else:

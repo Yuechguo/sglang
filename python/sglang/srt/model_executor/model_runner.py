@@ -1271,11 +1271,15 @@ class ModelRunner:
         else:
             num_layers = self.num_effective_layers
 
-        finall_kv_lora_rank = self.model_config.kv_lora_rank if self.model_config.padding_kv_lora_rank is None \
-                else self.model_config.padding_kv_lora_rank
         if self.use_mla_backend:
+            # Only access kv_lora_rank for MLA models
+            finall_kv_lora_rank = getattr(self.model_config, "kv_lora_rank", None)
+            padding_kv_lora_rank = getattr(self.model_config, "padding_kv_lora_rank", None)
+            if padding_kv_lora_rank is not None:
+                finall_kv_lora_rank = padding_kv_lora_rank
+            qk_rope_head_dim = getattr(self.model_config, "qk_rope_head_dim", 0)
             cell_size = (
-                (finall_kv_lora_rank + self.model_config.qk_rope_head_dim)
+                (finall_kv_lora_rank + qk_rope_head_dim)
                 * num_layers
                 * torch._utils._element_size(self.kv_cache_dtype)
             )
@@ -1286,7 +1290,7 @@ class ModelRunner:
                     (
                         (
                             finall_kv_lora_rank
-                            + self.model_config.qk_rope_head_dim
+                            + qk_rope_head_dim
                         )
                         // scale_block_size
                     )
@@ -1784,8 +1788,8 @@ class ModelRunner:
                 extra_args = {}
                 if self.use_mla_backend:
                     extra_args = {
-                        "kv_lora_rank": self.model_config.kv_lora_rank,
-                        "qk_rope_head_dim": self.model_config.qk_rope_head_dim,
+                        "kv_lora_rank": getattr(self.model_config, "kv_lora_rank", None),
+                        "qk_rope_head_dim": getattr(self.model_config, "qk_rope_head_dim", None),
                     }
                 self.token_to_kv_pool = HybridLinearKVPool(
                     page_size=self.page_size,
