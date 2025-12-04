@@ -54,6 +54,7 @@ class ForwardMetadata:
     kv_last_page_len: torch.Tensor
     max_q_len: int
     max_kv_len: Optional[int]
+    max_seqlen_qo: Optional[int]
 
 
 global_workspace_buffer = None
@@ -199,6 +200,7 @@ class AiterAttnBackend(AttentionBackend):
                 kv_last_page_len,
                 max_q_len,
                 None,
+                None,
             )
 
         elif forward_batch.forward_mode.is_draft_extend():
@@ -219,6 +221,7 @@ class AiterAttnBackend(AttentionBackend):
                     self.kv_last_page_len[:bs],
                     max(forward_batch.extend_seq_lens_cpu),
                     forward_batch.seq_lens_cpu.max().item(),
+                    None,
                 )
             else:
                 self.indices_updater_prefill.update(
@@ -236,6 +239,7 @@ class AiterAttnBackend(AttentionBackend):
                     None,
                     self.indices_updater_prefill.max_q_len,
                     self.indices_updater_prefill.max_kv_len,
+                    None,
                 )
         elif forward_batch.forward_mode.is_target_verify():
             if self.use_mla:
@@ -276,6 +280,7 @@ class AiterAttnBackend(AttentionBackend):
                     self.kv_last_page_len[:bs],
                     draft_num,
                     None,
+                    None,
                 )
             else:
                 self.indices_updater_prefill.update(
@@ -293,6 +298,7 @@ class AiterAttnBackend(AttentionBackend):
                     None,
                     self.indices_updater_prefill.max_q_len,
                     self.indices_updater_prefill.max_kv_len,
+                    None,
                 )
         else:
             prefix_lens = forward_batch.extend_prefix_lens
@@ -321,6 +327,7 @@ class AiterAttnBackend(AttentionBackend):
                     self.kv_last_page_len[:bs],
                     self.mla_indices_updater_prefill.max_q_len,
                     self.mla_indices_updater_prefill.max_kv_len,
+                    None,
                 )
             else:
                 self.indices_updater_prefill.update(
@@ -338,6 +345,7 @@ class AiterAttnBackend(AttentionBackend):
                     None,
                     self.indices_updater_prefill.max_q_len,
                     self.indices_updater_prefill.max_kv_len,
+                    None,
                 )
 
     def init_cuda_graph_state(
@@ -377,6 +385,7 @@ class AiterAttnBackend(AttentionBackend):
             qo_indptr = None
             kv_last_page_len = None
             max_q_len = None
+            max_seqlen_qo = None
 
             if spec_info is None:
                 kv_indptr = self.kv_indptr
@@ -402,6 +411,7 @@ class AiterAttnBackend(AttentionBackend):
                 )
                 kv_last_page_len = self.cuda_graph_kv_last_page_len[:bs]
                 max_q_len = 1
+                max_seqlen_qo = seq_lens.max().item()
 
             self.forward_metadata = ForwardMetadata(
                 kv_indptr,
@@ -410,6 +420,7 @@ class AiterAttnBackend(AttentionBackend):
                 kv_last_page_len,
                 max_q_len,
                 None,
+                max_seqlen_qo,
             )
 
         elif forward_mode.is_target_verify():
@@ -436,6 +447,7 @@ class AiterAttnBackend(AttentionBackend):
                 )
                 kv_last_page_len = self.cuda_graph_kv_last_page_len[:bs]
                 max_q_len = self.num_draft_tokens
+                max_seqlen_qo = self.num_draft_tokens
 
                 self.forward_metadata = ForwardMetadata(
                     kv_indptr,
@@ -444,6 +456,7 @@ class AiterAttnBackend(AttentionBackend):
                     kv_last_page_len,
                     max_q_len,
                     None,
+                    max_seqlen_qo,
                 )
             else:
                 seq_lens_sum = seq_lens.sum().item()
@@ -462,6 +475,7 @@ class AiterAttnBackend(AttentionBackend):
                     None,
                     self.indices_updater_prefill.max_q_len,
                     self.indices_updater_prefill.max_kv_len,
+                    None,
                 )
         elif forward_mode.is_draft_extend():
             num_tokens_per_bs = self.speculative_num_steps + 1
@@ -493,6 +507,7 @@ class AiterAttnBackend(AttentionBackend):
                 qo_indptr,
                 kv_last_page_len,
                 max_q_len,
+                None,
                 None,
             )
         else:
@@ -819,9 +834,8 @@ class AiterAttnBackend(AttentionBackend):
             qo_indptr = self.forward_metadata.qo_indptr
             kv_indices = self.forward_metadata.kv_indices
             kv_indptr = self.forward_metadata.kv_indptr
-            batch_size = qo_indptr.shape[0]-1
-            seq_lens_qo = forward_batch.seq_lens
-            max_seqlen_qo = seq_lens_qo.max().item()
+            max_seqlen_qo = self.forward_metadata.max_seqlen_qo
+            batch_size = qo_indptr.shape[0] - 1
             k_buffer = forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id)
             (
                 (work_meta_data_size, work_meta_data_type),
