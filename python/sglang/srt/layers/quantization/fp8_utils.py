@@ -667,6 +667,9 @@ def apply_fp8_linear(
     per_tensor_weights = weight_scale.numel() == 1
     per_tensor_activations = x_scale.numel() == 1
 
+    if _use_aiter:
+        per_tensor_weights=False
+        per_tensor_activations=False
     if (
         use_per_token_if_dynamic
         and not per_tensor_weights
