@@ -701,7 +701,7 @@ def apply_fp8_linear(
                 XQ=qinput_pad,
                 # WQ=weight_pad.T,
                 # XQ=qinput,
-                WQ=weight.T, 
+                WQ=weight, 
                 x_scale=x_scale,
                 w_scale=weight_scale,
                 dtype=input.dtype,
@@ -709,7 +709,7 @@ def apply_fp8_linear(
             # output = output[:, :N]
             if bias is not None:
                 output += bias
-            return _process_scaled_mm_output(output, input_2d.shape, output_shape)
+            return _process_scaled_mm_output(output, input_2d.shape, [*input.shape[:-1], weight.shape[0]])
         else:
             # For now validated on ROCm platform
             # fp8 rowwise scaling in torch._scaled_mm is introduced in
@@ -720,7 +720,7 @@ def apply_fp8_linear(
             # Fused GEMM_DQ Rowwise GEMM
             output = torch._scaled_mm(
                 qinput,
-                weight,
+                weight.T,
                 out_dtype=input.dtype,
                 scale_a=x_scale,
                 scale_b=weight_scale.t(),

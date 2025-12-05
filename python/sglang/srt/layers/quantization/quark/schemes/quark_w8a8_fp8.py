@@ -105,10 +105,10 @@ class QuarkW8A8Fp8(QuarkScheme):
                 pad_weight = F.pad(weight, (0, pad_size))
 
                 layer.weight = Parameter(
-                    shuffle_weight(pad_weight, (16, 16)).t(), requires_grad=False
+                    shuffle_weight(pad_weight, (16, 16)), requires_grad=False
                 )
             else:
-                layer.weight = Parameter(weight.t(), requires_grad=False)
+                layer.weight = Parameter(weight, requires_grad=False)
             # required by torch.compile to be torch.nn.Parameter
             layer.weight_scale = Parameter(weight_scale, requires_grad=False)
 

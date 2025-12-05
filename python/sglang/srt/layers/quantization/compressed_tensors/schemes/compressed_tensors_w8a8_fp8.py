@@ -84,10 +84,10 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
 
             if _use_aiter:
                 layer.weight = Parameter(
-                    shuffle_weight(weight, (16, 16)).t(), requires_grad=False
+                    shuffle_weight(weight, (16, 16)), requires_grad=False
                 )
             else:
-                layer.weight = Parameter(weight.t(), requires_grad=False)
+                layer.weight = Parameter(weight, requires_grad=False)
 
             # required by torch.compile to be torch.nn.Parameter
             layer.weight_scale = Parameter(weight_scale, requires_grad=False)
