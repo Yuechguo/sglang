@@ -192,6 +192,7 @@ class AiterAttnBackend(AttentionBackend):
                 qo_indptr[1 : bs + 1] = torch.cumsum(self.kv_last_page_len[:bs], dim=0)
                 kv_last_page_len = self.kv_last_page_len[:bs]
                 max_q_len = 1
+                max_seqlen_qo = forward_batch.seq_lens.max().item()
 
             self.forward_metadata = ForwardMetadata(
                 kv_indptr,
@@ -200,7 +201,7 @@ class AiterAttnBackend(AttentionBackend):
                 kv_last_page_len,
                 max_q_len,
                 None,
-                None,
+                max_seqlen_qo if self.use_mla else None,
             )
 
         elif forward_batch.forward_mode.is_draft_extend():
@@ -272,6 +273,7 @@ class AiterAttnBackend(AttentionBackend):
                     kv_indices,
                     self.req_to_token.stride(0),
                 )
+                max_seqlen_qo = draft_num  # For target verify with MLA
                 self.forward_metadata = ForwardMetadata(
                     kv_indptr,
                     kv_indices,
@@ -280,7 +282,7 @@ class AiterAttnBackend(AttentionBackend):
                     self.kv_last_page_len[:bs],
                     draft_num,
                     None,
-                    None,
+                    max_seqlen_qo,
                 )
             else:
                 self.indices_updater_prefill.update(
