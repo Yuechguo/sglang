@@ -585,7 +585,6 @@ class QuarkW8A8FP8MoEMethod(QuarkMoEMethod):
             # )
             return StandardCombineInput(hidden_states=output)
         else:
-            raise ValueError
             quant_info = TritonMoeQuantInfo(
                 w13_weight=layer.w13_weight,
                 w2_weight=layer.w2_weight,

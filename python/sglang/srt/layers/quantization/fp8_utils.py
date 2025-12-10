@@ -588,7 +588,7 @@ def apply_fp8_linear(
 
     # View input as 2D matrix for fp8 methods
     input_2d = input.view(-1, input.shape[-1])
-    output_shape = [*input.shape[:-1], weight.shape[1]]
+    output_shape = [*input.shape[:-1], weight.shape[0]]
 
     if compressed_tensor_quant:
         # Maybe apply padding to output, see comment in __init__
@@ -709,7 +709,7 @@ def apply_fp8_linear(
             # output = output[:, :N]
             if bias is not None:
                 output += bias
-            return _process_scaled_mm_output(output, input_2d.shape, [*input.shape[:-1], weight.shape[0]])
+            return _process_scaled_mm_output(output, input_2d.shape, output_shape)
         else:
             # For now validated on ROCm platform
             # fp8 rowwise scaling in torch._scaled_mm is introduced in
@@ -754,13 +754,10 @@ def apply_fp8_linear(
     #
     # For the scaled_mm fallback case, we break this down, since it
     # does not support s_w being a vector.
-    K = qinput.shape[-1]
-    padding_size = 128
-    pad_size = (padding_size - (K%padding_size)) % padding_size
-    qinput_pad = F.pad(qinput, (0, pad_size))
+
     return _apply_fallback_scaled_mm(
-        qinput_pad,
-        weight,
+        qinput,
+        weight.T,
         x_scale,
         weight_scale,
         input_2d.shape,
