@@ -686,27 +686,20 @@ def apply_fp8_linear(
             # x_scale -> input scale tensor, shape = (m, 1)
             # w_scale -> weight scale tensor, shape = (n ,1)
             # dtype -> output dtype
+            # Note: Weight N-padding is done during weight loading in quark_w8a8_fp8.py
+            # Here we only need to pad K dimension for input to match the padded weight
             K = qinput.shape[-1]
             padding_size = 128
-            pad_size = (padding_size - (K%padding_size)) % padding_size
+            pad_size = (padding_size - (K % padding_size)) % padding_size
             qinput_pad = F.pad(qinput, (0, pad_size))
 
-            # N = weight.shape[-1]
-            # n_pad_size = (padding_size - (N%padding_size)) % padding_size
-            # # print(f"{n_pad_size=}")
-            # weight_pad = F.pad(weight, (0, n_pad_size))
-            
-            # print(f"{qinput_pad.shape=}, {weight_pad.shape=}")
             output = gemm_a8w8_bpreshuffle(
                 XQ=qinput_pad,
-                # WQ=weight_pad.T,
-                # XQ=qinput,
                 WQ=weight, 
                 x_scale=x_scale,
                 w_scale=weight_scale,
                 dtype=input.dtype,
             )
-            # output = output[:, :N]
             if bias is not None:
                 output += bias
             return _process_scaled_mm_output(output, input_2d.shape, output_shape)

@@ -98,17 +98,33 @@ class QuarkW8A8Fp8(QuarkScheme):
             if self.per_token:
                 weight_scale = weight_scale.view(-1, 1)
             if _use_aiter:
-                # print(f"{weight.shape=}")
+                # Pad both N and K dimensions to 128-aligned before shuffle
+                N = weight.shape[0]
                 K = weight.shape[-1]
                 padding_size = 128
-                pad_size = (padding_size - (K%padding_size)) % padding_size
-                pad_weight = F.pad(weight, (0, pad_size))
+                k_pad_size = (padding_size - (K % padding_size)) % padding_size
+                n_pad_size = (padding_size - (N % padding_size)) % padding_size
+                # F.pad format: (left, right, top, bottom) for 2D tensor
+                # Here: K is dim 1 (right padding), N is dim 0 (bottom padding)
+                pad_weight = F.pad(weight, (0, k_pad_size, 0, n_pad_size))
 
                 layer.weight = Parameter(
                     shuffle_weight(pad_weight, (16, 16)), requires_grad=False
                 )
+                # Also pad weight_scale for N dimension
+                # weight_scale shape: (N, 1) for per_token or (N,) otherwise
+                if n_pad_size > 0:
+                    if weight_scale.dim() == 2:
+                        # Shape is (N, 1), pad on dim 0
+                        weight_scale = F.pad(weight_scale, (0, 0, 0, n_pad_size), value=1.0)
+                    else:
+                        # Shape is (N,), pad on dim 0
+                        weight_scale = F.pad(weight_scale, (0, n_pad_size), value=1.0)
+                # Store original N for output slicing
+                layer.original_out_features = N
             else:
                 layer.weight = Parameter(weight, requires_grad=False)
+                layer.original_out_features = None
             # required by torch.compile to be torch.nn.Parameter
             layer.weight_scale = Parameter(weight_scale, requires_grad=False)
 
@@ -182,7 +198,7 @@ class QuarkW8A8Fp8(QuarkScheme):
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
 
-        return apply_fp8_linear(
+        output = apply_fp8_linear(
             x,
             layer.weight,
             layer.weight_scale,
@@ -191,3 +207,7 @@ class QuarkW8A8Fp8(QuarkScheme):
             cutlass_fp8_supported=self.cutlass_fp8_supported,
             use_per_token_if_dynamic=self.per_token,
         )
+        # Slice output to remove N-padding if weight was padded during loading
+        if hasattr(layer, 'original_out_features') and layer.original_out_features is not None:
+            output = output[..., :layer.original_out_features]
+        return output
