@@ -19,13 +19,16 @@ from sglang.srt.layers.quantization.fp8_utils import (
 )
 from sglang.srt.layers.quantization.quark.schemes import QuarkScheme
 from sglang.srt.layers.quantization.utils import requantize_with_max_scale
-from sglang.srt.utils import get_bool_env_var, is_hip, set_weight_attrs
+from sglang.srt.utils import get_bool_env_var, is_hip, set_weight_attrs, get_int_env_var
 
 __all__ = ["QuarkW8A8Fp8"]
 
 _is_fp8_fnuz = is_fp8_fnuz()
 _is_hip = is_hip()
 _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
+# AITER_FP8_PAD_N/K: padding alignment size (e.g., 128 or 256), 0 or unset means no padding
+_fp8_pad_n = get_int_env_var("AITER_FP8_PAD_N")
+_fp8_pad_k = get_int_env_var("AITER_FP8_PAD_K")
 if _use_aiter:
     from aiter.ops.shuffle import shuffle_weight
 
@@ -98,15 +101,17 @@ class QuarkW8A8Fp8(QuarkScheme):
             if self.per_token:
                 weight_scale = weight_scale.view(-1, 1)
             if _use_aiter:
-                # Pad both N and K dimensions to 128-aligned before shuffle
+                # Pad N and K dimensions to alignment before shuffle
+                # AITER_FP8_PAD_N/K specifies the alignment (e.g., 128 or 256), 0 means no padding
                 N = weight.shape[0]
                 K = weight.shape[-1]
-                padding_size = 128
-                k_pad_size = (padding_size - (K % padding_size)) % padding_size
-                n_pad_size = (padding_size - (N % padding_size)) % padding_size
+                # Pad K to _fp8_pad_k alignment if set (e.g., 128, 256)
+                k_pad_size = (_fp8_pad_k - (K % _fp8_pad_k)) % _fp8_pad_k if _fp8_pad_k > 0 else 0
+                # Pad N to _fp8_pad_n alignment if set (e.g., 128, 256)
+                n_pad_size = (_fp8_pad_n - (N % _fp8_pad_n)) % _fp8_pad_n if _fp8_pad_n > 0 else 0
                 # F.pad format: (left, right, top, bottom) for 2D tensor
                 # Here: K is dim 1 (right padding), N is dim 0 (bottom padding)
-                pad_weight = F.pad(weight, (0, k_pad_size, 0, n_pad_size))
+                pad_weight = F.pad(weight, (0, k_pad_size, 0, n_pad_size)) if (k_pad_size > 0 or n_pad_size > 0) else weight
 
                 layer.weight = Parameter(
                     shuffle_weight(pad_weight, (16, 16)), requires_grad=False

@@ -29,6 +29,7 @@ from sglang.srt.layers.quantization.fp8_kernel import (
 from sglang.srt.utils import (
     align,
     get_bool_env_var,
+    get_int_env_var,
     get_cuda_version,
     get_device_capability,
     is_cuda,
@@ -41,6 +42,8 @@ _is_cuda = is_cuda()
 _is_fp8_fnuz = is_fp8_fnuz()
 
 _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
+# AITER_FP8_PAD_K: K dimension padding alignment size (e.g., 128 or 256), 0 or unset means no padding
+_fp8_pad_k = get_int_env_var("AITER_FP8_PAD_K")
 
 if _use_aiter:
     import aiter
@@ -686,12 +689,12 @@ def apply_fp8_linear(
             # x_scale -> input scale tensor, shape = (m, 1)
             # w_scale -> weight scale tensor, shape = (n ,1)
             # dtype -> output dtype
-            # Note: Weight N-padding is done during weight loading in quark_w8a8_fp8.py
+            # Note: Weight N/K-padding is done during weight loading in quark_w8a8_fp8.py
             # Here we only need to pad K dimension for input to match the padded weight
+            # AITER_FP8_PAD_K specifies the alignment (e.g., 128 or 256), 0 means no padding
             K = qinput.shape[-1]
-            padding_size = 128
-            pad_size = (padding_size - (K % padding_size)) % padding_size
-            qinput_pad = F.pad(qinput, (0, pad_size))
+            pad_size = (_fp8_pad_k - (K % _fp8_pad_k)) % _fp8_pad_k if _fp8_pad_k > 0 else 0
+            qinput_pad = F.pad(qinput, (0, pad_size)) if pad_size > 0 else qinput
 
             output = gemm_a8w8_bpreshuffle(
                 XQ=qinput_pad,
