@@ -1274,9 +1274,9 @@ class ModelRunner:
         if self.use_mla_backend:
             # Only access kv_lora_rank for MLA models
             finall_kv_lora_rank = getattr(self.model_config, "kv_lora_rank", None)
-            # padding_kv_lora_rank = getattr(self.model_config, "padding_kv_lora_rank", None)
-            # if padding_kv_lora_rank is not None:
-            #     finall_kv_lora_rank = padding_kv_lora_rank
+            padding_kv_lora_rank = getattr(self.model_config, "padding_kv_lora_rank", None)
+            if padding_kv_lora_rank is not None:
+                finall_kv_lora_rank = padding_kv_lora_rank
             qk_rope_head_dim = getattr(self.model_config, "qk_rope_head_dim", 0)
             cell_size = (
                 (finall_kv_lora_rank + qk_rope_head_dim)
@@ -1743,7 +1743,11 @@ class ModelRunner:
                 self.max_total_num_tokens,
                 page_size=self.page_size,
                 dtype=self.kv_cache_dtype,
-                kv_lora_rank=self.model_config.kv_lora_rank,
+                kv_lora_rank= 
+                    (   
+                        self.model_config.kv_lora_rank if self.model_config.padding_kv_lora_rank is None 
+                        else self.model_config.padding_kv_lora_rank
+                    ),
                 qk_rope_head_dim=self.model_config.qk_rope_head_dim,
                 layer_num=self.num_effective_layers,
                 device=self.device,
