@@ -627,9 +627,14 @@ def apply_fp8_linear(
                         use_per_token_if_dynamic=use_per_token_if_dynamic,
                     )
                 else:
-                    qinput, x_scale = per_token_group_quant_fp8(
-                        input_2d, group_size=input_2d.shape[1]
-                    )
+                    if _use_aiter:
+                        qinput = torch.empty_like(input_2d, dtype=torch.float8_e4m3fnuz)
+                        x_scale = torch.empty((input_2d.shape[0], 1), dtype=torch.float32, device=input_2d.device)
+                        aiter.dynamic_per_token_scaled_quant(qinput, input_2d, x_scale)
+                    else:
+                        qinput, x_scale = per_token_group_quant_fp8(
+                            input_2d, group_size=input_2d.shape[1]
+                        )
 
     if cutlass_fp8_supported and weight_scale.numel() == weight.shape[1]:
         # cutlass_scaled_mm supports per tensor/channel W and per tensor/token A
