@@ -6,10 +6,11 @@ import dataclasses
 import hashlib
 import json
 import struct
+import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping, Optional, Protocol, runtime_checkable
 from urllib.parse import unquote, urlparse
 
 import numpy as np
@@ -17,8 +18,22 @@ import torch
 import transformers
 from PIL import Image
 
+from sglang.srt.environ import envs
+from sglang.srt.multimodal.cache.digest import dataclass_items, structured_digest
+from sglang.srt.runtime_context import get_mm, get_model
+
 CONTENT_HASH_PREFIX = "sha256:"
 _SHA256_HEX_LENGTH = 64
+_MEDIA_ENVELOPE_FIELDS = frozenset(
+    {"type", "format", "url", "image", "video", "audio", "content_hash"}
+)
+
+
+@runtime_checkable
+class PreprocessFingerprintProvider(Protocol):
+    """Explicit source for settings that can change processor artifacts."""
+
+    def preprocess_fingerprint_payload(self) -> Any: ...
 
 
 def parse_content_hash(value: Optional[str]) -> Optional[str]:
@@ -60,8 +75,11 @@ class MediaSnapshot:
 
 
 def _snapshot_pil(image: Image.Image) -> MediaSnapshot:
-    snapshot = image.copy()
-    snapshot.load()
+    try:
+        snapshot = image.copy()
+        snapshot.load()
+    except OSError as e:
+        raise ValueError(f"Could not decode image: {e}") from e
     payload = snapshot.tobytes()
     palette = snapshot.palette.tobytes() if snapshot.palette is not None else b""
     palette_mode = (
@@ -116,7 +134,7 @@ def _read_media_bytes(media: str | bytes) -> bytes:
     if isinstance(media, bytes):
         return bytes(media)
 
-    from sglang.srt.utils import get_image_bytes, image_extension_names
+    from sglang.srt.multimodal.media_io import get_image_bytes, image_extension_names
 
     if media.startswith("file://"):
         media = unquote(urlparse(media).path)
@@ -135,7 +153,7 @@ def snapshot_media(media: Any) -> MediaSnapshot:
     Paths and URLs are deliberately not identities. They are resolved to bytes
     on every untrusted lookup, so changing their contents produces a cache miss.
     """
-    from sglang.srt.utils import ImageData
+    from sglang.srt.multimodal.media_io import ImageData
 
     if isinstance(media, ImageData):
         media = media.url
@@ -157,6 +175,41 @@ def snapshot_media(media: Any) -> MediaSnapshot:
     raise TypeError(f"Unsupported media identity input: {type(media).__name__}")
 
 
+def media_preprocess_kwargs(
+    source: Any, *, defaults: Optional[Mapping[str, Any]] = None
+) -> dict[str, Any]:
+    """Conservatively capture per-request options that can affect an artifact.
+
+    Unknown options are included instead of allow-listed. This may create a safe
+    false miss for a metadata-only option, but it prevents a new model option
+    from silently creating a false cache hit.
+    """
+    defaults = defaults or {}
+    if dataclasses.is_dataclass(source):
+        values = {
+            name: value
+            for name, value in dataclass_items(source)
+            if name not in _MEDIA_ENVELOPE_FIELDS
+        }
+    elif isinstance(source, Mapping):
+        values = {
+            key: value
+            for key, value in source.items()
+            if key not in _MEDIA_ENVELOPE_FIELDS
+        }
+    else:
+        return {}
+
+    result = {}
+    for key, value in values.items():
+        if value is None or (isinstance(value, Mapping) and not value):
+            continue
+        if key in defaults and _canonicalize(value) == _canonicalize(defaults[key]):
+            continue
+        result[key] = value
+    return result
+
+
 def _qualified_type_name(value: Any) -> str:
     value_type = type(value)
     return f"{value_type.__module__}.{value_type.__qualname__}"
@@ -173,8 +226,8 @@ def _canonicalize(value: Any) -> Any:
             "type": "dataclass",
             "class": _qualified_type_name(value),
             "fields": [
-                [field.name, _canonicalize(getattr(value, field.name))]
-                for field in dataclasses.fields(value)
+                [name, _canonicalize(field_value)]
+                for name, field_value in dataclass_items(value)
             ],
         }
     if isinstance(value, Enum):
@@ -244,8 +297,7 @@ def _canonicalize(value: Any) -> Any:
             "items": items,
         }
     raise ValueError(
-        "Unsupported value in multimodal cache identity: "
-        f"{_qualified_type_name(value)}"
+        f"Unsupported value in multimodal cache identity: {_qualified_type_name(value)}"
     )
 
 
@@ -273,56 +325,97 @@ def build_artifact_key(
     return _digest_bytes(_canonical_json(payload))
 
 
-def build_feature_hash(artifact_key: str, processor_output_hash: int) -> int:
-    """Namespace a processor-output hash by its complete artifact identity."""
-    artifact_key = parse_content_hash(artifact_key)
-    if (
-        isinstance(processor_output_hash, bool)
-        or not isinstance(processor_output_hash, int)
-        or processor_output_hash < 0
-    ):
-        raise ValueError("processor_output_hash must be a non-negative integer")
-    output_hash_bytes = processor_output_hash.to_bytes(
-        max(1, (processor_output_hash.bit_length() + 7) // 8),
-        byteorder="big",
-        signed=False,
+def resolve_multimodal_item_identity(
+    *,
+    feature: Any = None,
+    precomputed_embeddings: Any = None,
+    modality: str = "",
+    input_format: str = "",
+    metadata: Any = None,
+    namespace: Optional[str] = None,
+    existing_hash: Optional[int] = None,
+) -> bytes:
+    """Identify the actual encoder inputs, including their semantic metadata.
+
+    Scalar hints are supplementary, not substitutes for feature contents. A
+    source/config namespace can be reused without pixels only by server-owned
+    artifacts whose producer has already verified their content.
+    """
+    from sglang.srt.managers.mm_utils import hash_feature_digest
+
+    if envs.SGLANG_MM_SKIP_COMPUTE_HASH.get():
+        return structured_digest(("uncached-mm", uuid.uuid4().bytes))
+    if namespace is not None:
+        namespace = parse_content_hash(namespace)
+        if existing_hash is not None and existing_hash < 0:
+            raise ValueError("Artifact feature hashes must be nonnegative")
+    return hash_feature_digest(
+        (
+            "multimodal-item-v2",
+            modality,
+            input_format,
+            namespace,
+            existing_hash,
+            feature,
+            precomputed_embeddings,
+            metadata,
+        )
     )
-    digest = _hash_parts(
-        b"multimodal-feature-v1",
-        bytes.fromhex(artifact_key[len(CONTENT_HASH_PREFIX) :]),
-        output_hash_bytes,
-    )
+
+
+def resolve_multimodal_item_hash(
+    *,
+    existing_hash: Optional[int] = None,
+    feature: Any = None,
+    precomputed_embeddings: Any = None,
+    namespace: Optional[str] = None,
+) -> int:
+    """Full-width artifact fingerprint; scalar wire hashes are not cache keys.
+
+    A namespace covers every source/config input that can change preprocessing.
+    Keep all 256 bits when carrying this value in an in-process artifact.
+    """
     return int.from_bytes(
-        bytes.fromhex(digest[len(CONTENT_HASH_PREFIX) :])[:8],
-        byteorder="big",
-        signed=False,
+        resolve_multimodal_item_identity(
+            existing_hash=existing_hash,
+            feature=feature,
+            precomputed_embeddings=precomputed_embeddings,
+            namespace=namespace,
+        ),
+        "big",
     )
 
 
 def build_processor_fingerprint(
     processor: Any,
     hf_config: Any,
-    server_args: Any,
     *,
     extra: Optional[Mapping[str, Any]] = None,
 ) -> str:
-    """Fingerprint preprocessing choices that can change processor output."""
+    """Fingerprint preprocessing choices that can change processor output.
+
+    Every config value comes from the published bags, which is the only source
+    that answers the *effective* preprocessing config. Taking any of them from
+    a handed ``ServerArgs`` would let two callers with the same effective
+    config disagree on the digest -- and an omitted one silently fingerprint
+    the empty config, which is how incompatible artifacts get reused.
+    """
     processor_payload = (
         processor.preprocess_fingerprint_payload()
-        if hasattr(processor, "preprocess_fingerprint_payload")
+        if isinstance(processor, PreprocessFingerprintProvider)
         else {}
     )
+    hf_payload = hf_config.to_dict()
     payload = {
         "transformers": transformers.__version__,
         "processor_class": f"{type(processor).__module__}.{type(processor).__qualname__}",
-        "model_type": getattr(hf_config, "model_type", None),
-        "architectures": getattr(hf_config, "architectures", None),
-        "model_revision": getattr(server_args, "revision", None),
-        "tokenizer_revision": getattr(server_args, "tokenizer_revision", None),
-        "disable_fast_image_processor": getattr(
-            server_args, "disable_fast_image_processor", False
-        ),
-        "mm_process_config": getattr(server_args, "mm_process_config", None) or {},
+        "model_type": hf_payload.get("model_type"),
+        "architectures": hf_payload.get("architectures"),
+        "model_config": hf_payload,
+        "model_revision": get_model().revision,
+        "processor_revision": get_model().revision,
+        "disable_fast_image_processor": get_mm().disable_fast_image_processor,
+        "mm_process_config": get_mm().mm_process_config or {},
         "processor": processor_payload,
         "extra": extra or {},
     }
